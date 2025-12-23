@@ -1,12 +1,11 @@
 'use client';
 
-import { useState, useMemo, memo, useCallback } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import { FileUpload } from '@/components/FileUpload';
 import { FileInfo } from '@/components/FileInfo';
 import { Filters } from '@/components/Filters';
 import dynamic from 'next/dynamic';
-import { memo } from 'react';
 
 // Lazy load tab components for code splitting
 const OverviewTab = dynamic(() => import('@/components/tabs/OverviewTab').then(mod => ({ default: mod.OverviewTab })), {
