@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback, useEffect } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import { FileUpload } from '@/components/FileUpload';
 import { FileInfo } from '@/components/FileInfo';
@@ -33,11 +33,13 @@ export function Dashboard() {
   // Use selector to only subscribe to rawTransactions
   const rawTransactions = useStore((state) => state.rawTransactions);
   const isLoading = useStore((state) => state.isLoading);
+  const hasHydrated = useStore((state) => state.hasHydrated);
   const setFilters = useStore((state) => state.setFilters);
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   
-  // Show dashboard if we have data - simple check, no hydration delay needed
+  // Avoid flashing uploader during rehydrate: show uploader only after hydration completes.
   const hasData = rawTransactions.length > 0;
+  const showUploader = hasHydrated && !isLoading && !hasData;
   
   // Payment mode options based on active tab - memoized
   const getPaymentModeOptions = useMemo(() => {
@@ -107,7 +109,7 @@ export function Dashboard() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-6">
-        {!hasData ? (
+        {showUploader ? (
           <div className="max-w-3xl mx-auto">
             <FileUpload />
           </div>

@@ -17,6 +17,7 @@ interface StoreState {
   fileSizes: number[];
   _skipPersistence: boolean; // Internal flag to skip persistence during large loads
   progress: ProcessingProgress | null; // Progress tracking for large files
+  hasHydrated: boolean; // True after Zustand persist rehydration completes
   
   // Filters
   filters: FilterState;
@@ -94,6 +95,7 @@ export const useStore = create<StoreState>()(
   fileSizes: [],
   _skipPersistence: false,
   progress: null,
+  hasHydrated: false,
   filters: defaultFilters,
   filteredTransactions: [],
   globalMetrics: null,
@@ -101,7 +103,7 @@ export const useStore = create<StoreState>()(
   
   setRawTransactions: (transactions) => {
     set({ rawTransactions: transactions });
-    get().applyFilters();
+    void get().applyFilters();
   },
   
   loadDataFromFile: async (file: File) => {
@@ -257,7 +259,7 @@ export const useStore = create<StoreState>()(
     set({ filters: defaultFilters });
     cancelPendingFilter();
     // Apply immediately for reset - handle async properly
-    get().applyFilters().catch((error) => {
+    void get().applyFilters().catch((error) => {
       console.error('Error applying filters after reset:', error);
     });
   },
@@ -269,70 +271,56 @@ export const useStore = create<StoreState>()(
       set({ filteredTransactions: [], globalMetrics: null, dailyTrends: [] });
       return;
     }
-    
-    // Use Web Worker for filtering large datasets (>10k rows) to prevent UI blocking
-    const useWorker = rawTransactions.length > 10000;
-    
-    try {
-      let filtered: Transaction[];
-      
-      if (useWorker) {
-        // Use Web Worker for large datasets
-        filtered = await filterWorkerManager.filterTransactions(rawTransactions, filters);
-      } else {
-        // Use main thread for small datasets (faster for small data)
-        const { filterTransactions } = await import('@/lib/filter-utils');
-        filtered = filterTransactions(rawTransactions, filters);
-      }
-      
-      set({ filteredTransactions: filtered });
-      
-      // Compute metrics using Web Worker for large datasets
-      cancelPendingMetrics();
-      
-      if (typeof requestAnimationFrame !== 'undefined') {
-        const rafId = requestAnimationFrame(async () => {
-          if (!isComputing) {
-            isComputing = true;
-            try {
-              await get().computeMetrics();
-            } catch (error) {
-              console.error('Error computing metrics:', error);
-            } finally {
-              isComputing = false;
-            }
-          }
-          metricsTimeout = null;
-        });
-        metricsTimeout = rafId;
-      } else {
-        metricsTimeout = setTimeout(async () => {
-          if (!isComputing) {
-            isComputing = true;
-            try {
-              await get().computeMetrics();
-            } catch (error) {
-              console.error('Error computing metrics:', error);
-            } finally {
-              isComputing = false;
-            }
-          }
-          metricsTimeout = null;
-        }, 0);
-      }
-    } catch (error) {
-      console.error('Error applying filters:', error);
-      // Fallback to main thread - ensure we always set filtered transactions
-      try {
-        const { filterTransactions } = await import('@/lib/filter-utils');
-        const filtered = filterTransactions(rawTransactions, filters);
-        set({ filteredTransactions: filtered });
-        await get().computeMetrics();
-      } catch (fallbackError) {
-        console.error('Fallback filter also failed:', fallbackError);
-        // Last resort: set empty array to prevent infinite loading
-        set({ filteredTransactions: [], globalMetrics: null, dailyTrends: [] });
-      }
+
+    // IMPORTANT: Do NOT send huge arrays to Web Workers on every filter change.
+    // Structured-clone of 100k+ objects blocks the main thread and causes lag / "no data" races.
+    // Instead, do chunked filtering on the main thread and yield between chunks.
+    const { filterTransactions } = await import('@/lib/filter-utils');
+
+    const CHUNK_SIZE = rawTransactions.length > 200000 ? 2000 : 5000;
+    const filtered: Transaction[] = [];
+
+    // Pre-yield helper
+    const yieldToBrowser = async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    };
+
+    // Filter in chunks
+    for (let i = 0; i < rawTransactions.length; i += CHUNK_SIZE) {
+      const chunk = rawTransactions.slice(i, i + CHUNK_SIZE);
+      // Reuse existing filter logic for correctness
+      const chunkFiltered = filterTransactions(chunk, filters);
+      filtered.push(...chunkFiltered);
+
+      // Yield every chunk so UI stays responsive
+      await yieldToBrowser();
+    }
+
+    set({ filteredTransactions: filtered });
+
+    // Defer metrics computation
+    cancelPendingMetrics();
+    if (typeof requestAnimationFrame !== 'undefined') {
+      const rafId = requestAnimationFrame(() => {
+        if (!isComputing) {
+          isComputing = true;
+          void get().computeMetrics().finally(() => {
+            isComputing = false;
+          });
+        }
+        metricsTimeout = null;
+      });
+      metricsTimeout = rafId;
+    } else {
+      metricsTimeout = setTimeout(() => {
+        if (!isComputing) {
+          isComputing = true;
+          void get().computeMetrics().finally(() => {
+            isComputing = false;
+          });
+        }
+        metricsTimeout = null;
+      }, 0);
     }
   },
   
@@ -344,29 +332,13 @@ export const useStore = create<StoreState>()(
       return;
     }
     
-    // Use Web Worker for large datasets (>10k rows)
-    const useWorker = filteredTransactions.length > 10000;
-    
-    try {
-      let result: { globalMetrics: Metrics | null; dailyTrends: DailyTrend[] };
-      
-      if (useWorker) {
-        // Use Web Worker for large datasets
-        result = await filterWorkerManager.computeMetrics(filteredTransactions);
-      } else {
-        // Use main thread for small datasets
-        const { computeMetricsSync } = await import('@/lib/filter-utils');
-        result = computeMetricsSync(filteredTransactions);
-      }
-      
-      set({ globalMetrics: result.globalMetrics, dailyTrends: result.dailyTrends });
-    } catch (error) {
-      console.error('Error computing metrics:', error);
-      // Fallback to main thread
-      const { computeMetricsSync } = await import('@/lib/filter-utils');
-      const result = computeMetricsSync(filteredTransactions);
-      set({ globalMetrics: result.globalMetrics, dailyTrends: result.dailyTrends });
-    }
+    // Compute metrics on main thread (no worker cloning), but yield occasionally for huge sets.
+    const { computeMetricsSync } = await import('@/lib/filter-utils');
+
+    // For very large datasets, chunking+yield is handled by applyFilters already, and
+    // computeMetricsSync is a single pass; keep it synchronous for correctness/simplicity.
+    const result = computeMetricsSync(filteredTransactions);
+    set({ globalMetrics: result.globalMetrics, dailyTrends: result.dailyTrends });
   },
   
   addDataFromFile: async (file: File) => {
@@ -507,13 +479,18 @@ export const useStore = create<StoreState>()(
         return { ...currentState, ...persistedState };
       },
       onRehydrateStorage: () => (state) => {
+        // Mark hydration complete regardless of persisted state presence
+        useStore.setState({ hasHydrated: true });
+
         // After rehydration, apply filters to recompute metrics
         if (state && state.rawTransactions && state.rawTransactions.length > 0) {
           // Use setTimeout to ensure state is fully rehydrated
           setTimeout(() => {
             const store = useStore.getState();
             if (store.rawTransactions.length > 0) {
-              store.applyFilters();
+              void store.applyFilters().catch((e) => {
+                console.error('Error applying filters after rehydrate:', e);
+              });
             }
           }, 100);
         }
