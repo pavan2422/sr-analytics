@@ -6,7 +6,6 @@ import { normalizeData, classifyUPIFlow } from '@/lib/data-normalization';
 import { indexedDBStorage } from './indexedDBStorage';
 import { streamCSVFile, processExcelFile, ProcessingProgress } from '@/lib/file-processor';
 import { WorkerManager } from '@/lib/worker-manager';
-import { FilterWorkerManager } from '@/lib/filter-worker-manager';
 
 interface StoreState {
   // Raw data
@@ -55,7 +54,6 @@ const defaultFilters: FilterState = {
 
 // Worker manager instances (shared across store)
 const workerManager = new WorkerManager();
-const filterWorkerManager = new FilterWorkerManager();
 
 // Debounce and defer heavy computations
 let filterTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -214,23 +212,10 @@ export const useStore = create<StoreState>()(
       
       // For large datasets, persist asynchronously after a delay
       if (shouldSkipPersistence) {
-        // IMPORTANT: We still want persistence to happen quickly enough that refresh doesn't
-        // leave us with only file metadata. We flip the flag soon, then trigger persistence
-        // when the browser is idle (to reduce jank from JSON serialization).
-        setTimeout(() => {
-          set({ _skipPersistence: false });
-          const trigger = () => {
-            const currentState = get();
-            // Force a state update to trigger persistence
-            set({ rawTransactions: [...currentState.rawTransactions] });
-          };
-
-          if (typeof (window as any)?.requestIdleCallback === 'function') {
-            (window as any).requestIdleCallback(trigger, { timeout: 500 });
-          } else {
-            setTimeout(trigger, 0);
-          }
-        }, 200);
+        // IMPORTANT:
+        // Persisting 50k+ transactions as JSON can cause Chrome renderer OOM ("Aw, Snap").
+        // We intentionally keep `_skipPersistence` enabled for large datasets.
+        // This means a refresh requires re-upload for very large files, but the app won't crash.
       }
       
       // Set progress first
@@ -288,28 +273,52 @@ export const useStore = create<StoreState>()(
     // Signal UI that we're doing heavy work post-upload / post-filter change
     set({ analysisStage: 'FILTERING' });
 
-    // IMPORTANT: Do NOT send huge arrays to Web Workers on every filter change.
-    // Structured-clone of 100k+ objects blocks the main thread and causes lag / "no data" races.
-    // Instead, do chunked filtering on the main thread and yield between chunks.
-    const { filterTransactions } = await import('@/lib/filter-utils');
-
-    const CHUNK_SIZE = rawTransactions.length > 200000 ? 2000 : 5000;
+    // Stream filter in a single pass (no chunk slicing / extra arrays).
     const filtered: Transaction[] = [];
 
-    // Pre-yield helper
-    const yieldToBrowser = async () => {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    };
+    const endDate = filters.dateRange.end ? new Date(filters.dateRange.end) : null;
+    if (endDate) endDate.setHours(23, 59, 59, 999);
 
-    // Filter in chunks
-    for (let i = 0; i < rawTransactions.length; i += CHUNK_SIZE) {
-      const chunk = rawTransactions.slice(i, i + CHUNK_SIZE);
-      // Reuse existing filter logic for correctness
-      const chunkFiltered = filterTransactions(chunk, filters);
-      filtered.push(...chunkFiltered);
+    const paymentModeSet = filters.paymentModes.length > 0 ? new Set(filters.paymentModes) : null;
+    const merchantIdSet = filters.merchantIds.length > 0 ? new Set(filters.merchantIds) : null;
+    const pgSet = filters.pgs.length > 0 ? new Set(filters.pgs) : null;
+    const bankSet = filters.banks.length > 0 ? new Set(filters.banks) : null;
+    const cardTypeSet = filters.cardTypes.length > 0 ? new Set(filters.cardTypes) : null;
 
-      // Yield every chunk so UI stays responsive
-      await yieldToBrowser();
+    const yieldEvery = rawTransactions.length > 200000 ? 5000 : 10000;
+
+    for (let i = 0; i < rawTransactions.length; i++) {
+      const tx = rawTransactions[i];
+
+      const pg = String(tx.pg || '').trim().toUpperCase();
+      if (pg === 'N/A' || pg === 'NA' || pg === '') continue;
+
+      if (filters.dateRange.start && tx.txtime < filters.dateRange.start) continue;
+      if (endDate && tx.txtime > endDate) continue;
+
+      if (paymentModeSet && !paymentModeSet.has(tx.paymentmode)) continue;
+
+      if (merchantIdSet) {
+        const merchantId = String(tx.merchantid || '').trim();
+        if (!merchantIdSet.has(merchantId)) continue;
+      }
+
+      if (pgSet && !pgSet.has(tx.pg)) continue;
+
+      if (bankSet) {
+        const flow = classifyUPIFlow(tx.bankname);
+        if (!bankSet.has(flow) && !bankSet.has(tx.bankname)) continue;
+      }
+
+      if (cardTypeSet && !cardTypeSet.has(tx.cardtype)) continue;
+
+      filtered.push(tx);
+
+      if (i % yieldEvery === 0) {
+        // Yield to keep UI responsive
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
     }
 
     set({ filteredTransactions: filtered });
@@ -457,6 +466,7 @@ export const useStore = create<StoreState>()(
       progress: null,
       filters: defaultFilters,
       analysisStage: null,
+      _skipPersistence: false,
     });
   },
   
