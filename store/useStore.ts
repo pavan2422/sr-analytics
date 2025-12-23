@@ -33,8 +33,8 @@ interface StoreState {
   clearData: () => void;
   setFilters: (filters: Partial<FilterState>) => void;
   resetFilters: () => void;
-  applyFilters: () => void;
-  computeMetrics: () => void;
+  applyFilters: () => Promise<void>;
+  computeMetrics: () => Promise<void>;
   
   // Computed selectors (memoized in components)
   getFilteredTransactions: () => Transaction[];
