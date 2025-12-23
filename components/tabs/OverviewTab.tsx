@@ -279,6 +279,16 @@ export function OverviewTab() {
     scatterData,
   } = allMetrics;
 
+  // Show loading state if data is being computed
+  if (!globalMetrics && filteredTransactions.length > 0) {
+    return (
+      <div className="flex items-center justify-center p-12">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+        <p className="text-muted-foreground ml-4">Computing metrics...</p>
+      </div>
+    );
+  }
+  
   if (!globalMetrics) {
     return (
       <div className="flex items-center justify-center p-12">

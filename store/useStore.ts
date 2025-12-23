@@ -218,12 +218,16 @@ export const useStore = create<StoreState>()(
         }, 1000);
       }
       
-      // Apply filters after a short delay to let state settle
+      // Set progress first
+      set({ progress: { processed: allNormalized.length, total: allNormalized.length, percentage: 100, stage: 'complete' } });
+      console.log('File loaded and processed successfully');
+      
+      // Apply filters immediately - use setTimeout to ensure state is set first
       setTimeout(() => {
-        get().applyFilters();
-        set({ progress: { processed: allNormalized.length, total: allNormalized.length, percentage: 100, stage: 'complete' } });
-        console.log('File loaded and processed successfully');
-      }, 100);
+        get().applyFilters().catch((error) => {
+          console.error('Error applying filters after file load:', error);
+        });
+      }, 50);
       
     } catch (error: any) {
       console.error('Error in loadDataFromFile:', error);
@@ -252,12 +256,19 @@ export const useStore = create<StoreState>()(
   resetFilters: () => {
     set({ filters: defaultFilters });
     cancelPendingFilter();
-    // Apply immediately for reset
-    get().applyFilters();
+    // Apply immediately for reset - handle async properly
+    get().applyFilters().catch((error) => {
+      console.error('Error applying filters after reset:', error);
+    });
   },
   
   applyFilters: async () => {
     const { rawTransactions, filters } = get();
+    
+    if (rawTransactions.length === 0) {
+      set({ filteredTransactions: [], globalMetrics: null, dailyTrends: [] });
+      return;
+    }
     
     // Use Web Worker for filtering large datasets (>10k rows) to prevent UI blocking
     const useWorker = rawTransactions.length > 10000;
@@ -283,8 +294,13 @@ export const useStore = create<StoreState>()(
         const rafId = requestAnimationFrame(async () => {
           if (!isComputing) {
             isComputing = true;
-            await get().computeMetrics();
-            isComputing = false;
+            try {
+              await get().computeMetrics();
+            } catch (error) {
+              console.error('Error computing metrics:', error);
+            } finally {
+              isComputing = false;
+            }
           }
           metricsTimeout = null;
         });
@@ -293,19 +309,30 @@ export const useStore = create<StoreState>()(
         metricsTimeout = setTimeout(async () => {
           if (!isComputing) {
             isComputing = true;
-            await get().computeMetrics();
-            isComputing = false;
+            try {
+              await get().computeMetrics();
+            } catch (error) {
+              console.error('Error computing metrics:', error);
+            } finally {
+              isComputing = false;
+            }
           }
           metricsTimeout = null;
         }, 0);
       }
     } catch (error) {
       console.error('Error applying filters:', error);
-      // Fallback to main thread
-      const { filterTransactions } = await import('@/lib/filter-utils');
-      const filtered = filterTransactions(rawTransactions, filters);
-      set({ filteredTransactions: filtered });
-      await get().computeMetrics();
+      // Fallback to main thread - ensure we always set filtered transactions
+      try {
+        const { filterTransactions } = await import('@/lib/filter-utils');
+        const filtered = filterTransactions(rawTransactions, filters);
+        set({ filteredTransactions: filtered });
+        await get().computeMetrics();
+      } catch (fallbackError) {
+        console.error('Fallback filter also failed:', fallbackError);
+        // Last resort: set empty array to prevent infinite loading
+        set({ filteredTransactions: [], globalMetrics: null, dailyTrends: [] });
+      }
     }
   },
   

@@ -30,25 +30,14 @@ type Tab = 'overview' | 'upi' | 'cards' | 'netbanking' | 'rca';
 // Components are already lazy-loaded, no need for additional memoization
 
 export function Dashboard() {
-  // Use selector to only subscribe to rawTransactions length
-  // Also check if store is hydrated to prevent showing uploader on refresh
+  // Use selector to only subscribe to rawTransactions
   const rawTransactions = useStore((state) => state.rawTransactions);
   const isLoading = useStore((state) => state.isLoading);
   const setFilters = useStore((state) => state.setFilters);
   const [activeTab, setActiveTab] = useState<Tab>('overview');
-  const [isHydrated, setIsHydrated] = useState(false);
   
-  // Check if store is hydrated (data loaded from persistence)
-  useEffect(() => {
-    // Use a small delay to allow Zustand to hydrate
-    const timer = setTimeout(() => {
-      setIsHydrated(true);
-    }, 50);
-    return () => clearTimeout(timer);
-  }, []);
-  
-  // Show dashboard if we have data OR if we're still loading (might be hydrating)
-  const hasData = rawTransactions.length > 0 || (isLoading && !isHydrated);
+  // Show dashboard if we have data - simple check, no hydration delay needed
+  const hasData = rawTransactions.length > 0;
   
   // Payment mode options based on active tab - memoized
   const getPaymentModeOptions = useMemo(() => {
