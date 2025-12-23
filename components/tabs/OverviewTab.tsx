@@ -162,21 +162,25 @@ export function OverviewTab() {
   // 7. Transaction Amount Distribution
   const amountDistributionData = useMemo(() => {
     const ranges = [
-      { name: '10000-50000', min: 10000, max: 50000 },
-      { name: '50000-100000', min: 50000, max: 100000 },
-      { name: '100000+', min: 100000, max: Infinity },
+      { name: '0-5000', min: 0, max: 5000 },
+      { name: '5000-10000', min: 5000, max: 10000 },
+      { name: '10000-25000', min: 10000, max: 25000 },
+      { name: '25000-100000', min: 25000, max: 100000 },
+      { name: '100000-200000', min: 100000, max: 200000 },
     ];
 
     const rangeMap = new Map<string, { success: number; total: number; gmv: number }>();
     
     filteredTransactions.forEach((tx: Transaction) => {
       const amount = tx.txamount || 0;
-      const range = ranges.find(r => amount >= r.min && amount < r.max) || ranges[ranges.length - 1];
+      // Find the matching range, or use the last range for amounts >= 200000
+      const range = ranges.find(r => amount >= r.min && amount < r.max);
+      const rangeName = range ? range.name : '200000+';
       
-      if (!rangeMap.has(range.name)) {
-        rangeMap.set(range.name, { success: 0, total: 0, gmv: 0 });
+      if (!rangeMap.has(rangeName)) {
+        rangeMap.set(rangeName, { success: 0, total: 0, gmv: 0 });
       }
-      const stats = rangeMap.get(range.name)!;
+      const stats = rangeMap.get(rangeName)!;
       stats.total++;
       if (tx.isSuccess) {
         stats.success++;
@@ -184,7 +188,13 @@ export function OverviewTab() {
       }
     });
 
-    return ranges.map((range) => {
+    // Include all defined ranges plus any overflow category
+    const allRanges = [...ranges];
+    if (rangeMap.has('200000+')) {
+      allRanges.push({ name: '200000+', min: 200000, max: Infinity });
+    }
+
+    return allRanges.map((range) => {
       const stats = rangeMap.get(range.name) || { success: 0, total: 0, gmv: 0 };
       return {
         name: `₹${range.name}`,
