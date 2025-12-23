@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import { Transaction, FilterState, Metrics, DailyTrend, GroupedMetrics, FailureRCA, RCAInsight, PeriodComparison } from '@/types';
 import { calculateSR, safeDivide } from '@/lib/utils';
 import { normalizeData, classifyUPIFlow } from '@/lib/data-normalization';
+import { indexedDBStorage } from './indexedDBStorage';
 
 interface StoreState {
   // Raw data
@@ -343,7 +344,7 @@ export const useStore = create<StoreState>()(
     }),
     {
       name: 'sr-analytics-storage',
-      storage: createJSONStorage(() => localStorage),
+      storage: createJSONStorage(() => indexedDBStorage),
       partialize: (state) => ({
         rawTransactions: state.rawTransactions,
         fileNames: state.fileNames,
