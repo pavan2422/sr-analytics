@@ -96,7 +96,7 @@ function FiltersComponent({ activeTab, paymentModeOptions }: FiltersProps) {
         clearTimeout(dateTimeout);
       }
       
-      // Debounce date changes (300ms for date inputs)
+      // Debounce date changes (200ms for date inputs)
       const timeout = setTimeout(() => {
         setFilters({
           dateRange: {
@@ -105,7 +105,7 @@ function FiltersComponent({ activeTab, paymentModeOptions }: FiltersProps) {
           },
         });
         setDateTimeout(null);
-      }, 300);
+      }, 200);
       
       setDateTimeout(timeout);
     },
@@ -119,7 +119,7 @@ function FiltersComponent({ activeTab, paymentModeOptions }: FiltersProps) {
         clearTimeout(dateTimeout);
       }
       
-      // Debounce date changes (300ms for date inputs)
+      // Debounce date changes (200ms for date inputs)
       const timeout = setTimeout(() => {
         setFilters({
           dateRange: {
@@ -128,7 +128,7 @@ function FiltersComponent({ activeTab, paymentModeOptions }: FiltersProps) {
           },
         });
         setDateTimeout(null);
-      }, 300);
+      }, 200);
       
       setDateTimeout(timeout);
     },

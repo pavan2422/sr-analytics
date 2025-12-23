@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useDeferredValue } from 'react';
 import { useStore } from '@/store/useStore';
 import { KPICard } from '@/components/KPICard';
 import { Chart } from '@/components/Chart';
@@ -13,13 +13,16 @@ export function OverviewTab() {
   const globalMetrics = useStore((state) => state.globalMetrics);
   const dailyTrends = useStore((state) => state.dailyTrends);
   const filteredTransactions = useStore((state) => state.filteredTransactions);
+  
+  // Defer heavy computation to prevent blocking
+  const deferredTransactions = useDeferredValue(filteredTransactions);
 
   // OPTIMIZED: Single pass computation for all metrics
   // This replaces 9 separate useMemo hooks that each iterated through all transactions
   const allMetrics = useMemo(() => {
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     
-    if (!filteredTransactions || filteredTransactions.length === 0) {
+    if (!deferredTransactions || deferredTransactions.length === 0) {
       return {
         statusDistribution: [],
         paymentModeData: [],
@@ -56,7 +59,7 @@ export function OverviewTab() {
       const rangeMap = new Map<string, { success: number; total: number; gmv: number }>();
 
       // SINGLE PASS through all transactions
-      for (const tx of filteredTransactions) {
+      for (const tx of deferredTransactions) {
         // Parse date once and reuse
         let txDate: Date | null = null;
         let hour = 0;
@@ -244,7 +247,7 @@ export function OverviewTab() {
         scatterData: [],
       };
     }
-  }, [filteredTransactions]);
+  }, [deferredTransactions]);
 
   // Transaction Status Distribution (from globalMetrics - no need to recompute)
   const statusDistribution = useMemo(() => {

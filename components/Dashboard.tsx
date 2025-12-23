@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useStore } from '@/store/useStore';
 import { FileUpload } from '@/components/FileUpload';
 import { FileInfo } from '@/components/FileInfo';
@@ -31,9 +31,24 @@ type Tab = 'overview' | 'upi' | 'cards' | 'netbanking' | 'rca';
 
 export function Dashboard() {
   // Use selector to only subscribe to rawTransactions length
-  const rawTransactionsLength = useStore((state) => state.rawTransactions.length);
+  // Also check if store is hydrated to prevent showing uploader on refresh
+  const rawTransactions = useStore((state) => state.rawTransactions);
+  const isLoading = useStore((state) => state.isLoading);
   const setFilters = useStore((state) => state.setFilters);
   const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const [isHydrated, setIsHydrated] = useState(false);
+  
+  // Check if store is hydrated (data loaded from persistence)
+  useEffect(() => {
+    // Use a small delay to allow Zustand to hydrate
+    const timer = setTimeout(() => {
+      setIsHydrated(true);
+    }, 50);
+    return () => clearTimeout(timer);
+  }, []);
+  
+  // Show dashboard if we have data OR if we're still loading (might be hydrating)
+  const hasData = rawTransactions.length > 0 || (isLoading && !isHydrated);
   
   // Payment mode options based on active tab - memoized
   const getPaymentModeOptions = useMemo(() => {
@@ -103,7 +118,7 @@ export function Dashboard() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-6">
-        {rawTransactionsLength === 0 ? (
+        {!hasData ? (
           <div className="max-w-3xl mx-auto">
             <FileUpload />
           </div>

@@ -66,11 +66,13 @@ export function DataTable<T = GroupedMetrics>({ data, columns, height = 400 }: D
             <tr key={headerGroup.id} className="border-b border-border">
               {headerGroup.headers.map((header, index) => {
                 // First column (usually text) = left align, others = right align
-                const alignClass = index === 0 ? 'text-left' : 'text-right';
+                // For Failure RCA tables, ensure consistent alignment
+                const isFirstColumn = index === 0;
+                const alignClass = isFirstColumn ? 'text-left' : 'text-right';
                 return (
                   <th
                     key={header.id}
-                    className={`py-3 px-4 ${alignClass} text-sm font-semibold text-muted-foreground`}
+                    className={`py-3 px-4 ${alignClass} text-sm font-semibold text-muted-foreground whitespace-nowrap`}
                   >
                     {header.isPlaceholder ? null : (
                       <span
@@ -123,11 +125,13 @@ export function DataTable<T = GroupedMetrics>({ data, columns, height = 400 }: D
                 >
                   {row.getVisibleCells().map((cell, cellIndex) => {
                     // First column (usually text) = left align, others = right align
-                    const alignClass = cellIndex === 0 ? 'text-left' : 'text-right';
+                    // For Failure RCA tables, ensure consistent alignment
+                    const isFirstColumn = cellIndex === 0;
+                    const alignClass = isFirstColumn ? 'text-left' : 'text-right';
                     return (
                       <td
                         key={cell.id}
-                        className={`py-3 px-4 text-sm ${alignClass}`}
+                        className={`py-3 px-4 text-sm ${alignClass} whitespace-nowrap`}
                       >
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
@@ -146,11 +150,13 @@ export function DataTable<T = GroupedMetrics>({ data, columns, height = 400 }: D
                 >
                   {row.getVisibleCells().map((cell, cellIndex) => {
                     // First column (usually text) = left align, others = right align
-                    const alignClass = cellIndex === 0 ? 'text-left' : 'text-right';
+                    // For Failure RCA tables, ensure consistent alignment
+                    const isFirstColumn = cellIndex === 0;
+                    const alignClass = isFirstColumn ? 'text-left' : 'text-right';
                     return (
                       <td
                         key={cell.id}
-                        className={`py-3 px-4 text-sm ${alignClass}`}
+                        className={`py-3 px-4 text-sm ${alignClass} whitespace-nowrap`}
                       >
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>

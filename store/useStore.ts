@@ -246,7 +246,7 @@ export const useStore = create<StoreState>()(
     filterTimeout = setTimeout(() => {
       get().applyFilters();
       filterTimeout = null;
-    }, 150); // 150ms debounce
+    }, 100); // 100ms debounce for faster response
   },
   
   resetFilters: () => {
