@@ -420,7 +420,7 @@ function InsightCard({ insight, rank, paymentMode }: { insight: RCAInsight; rank
 
       {insight.counterfactualSR && (
         <div className="mt-2 text-sm text-muted-foreground">
-          <span className="font-medium">Counterfactual:</span> If this issue didn't exist, <span className="font-medium text-foreground">{paymentMode}</span> SR would be{' '}
+          <span className="font-medium">Counterfactual:</span> If this issue didn&apos;t exist, <span className="font-medium text-foreground">{paymentMode}</span> SR would be{' '}
           <span className="text-primary font-medium">{insight.counterfactualSR.toFixed(2)}%</span>
         </div>
       )}

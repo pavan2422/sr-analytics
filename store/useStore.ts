@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { Transaction, FilterState, Metrics, DailyTrend, GroupedMetrics, FailureRCA, RCAInsight, PeriodComparison } from '@/types';
 import { calculateSR, safeDivide } from '@/lib/utils';
-import { normalizeData } from '@/lib/data-normalization';
+import { normalizeData, classifyUPIFlow } from '@/lib/data-normalization';
 
 interface StoreState {
   // Raw data
@@ -180,8 +180,6 @@ export const useStore = create<StoreState>((set, get) => ({
     // Bank filter (for UPI, this filters by INTENT/COLLECT classification)
     if (filters.banks.length > 0) {
       filtered = filtered.filter((tx) => {
-        // Import classification function
-        const { classifyUPIFlow } = require('@/lib/data-normalization');
         const flow = classifyUPIFlow(tx.bankname);
         // Match if selected bank is the flow type (INTENT/COLLECT) or actual bankname
         return filters.banks.includes(flow) || filters.banks.includes(tx.bankname);
