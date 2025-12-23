@@ -11,7 +11,8 @@ import { GroupedMetrics, FailureRCA } from '@/types';
 import { formatNumber } from '@/lib/utils';
 
 export function NetbankingTab() {
-  const { filteredTransactions } = useStore();
+  // Use selector to only subscribe to filteredTransactions
+  const filteredTransactions = useStore((state) => state.filteredTransactions);
   const netbankingPaymentModes = ['NET_BANKING'];
 
   const nbMetrics = useMemo(() => {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useCallback, memo } from 'react';
 import { useStore } from '@/store/useStore';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
@@ -11,8 +11,12 @@ interface FiltersProps {
   paymentModeOptions?: string[];
 }
 
-export function Filters({ activeTab, paymentModeOptions }: FiltersProps) {
-  const { rawTransactions, filters, setFilters, resetFilters } = useStore();
+function FiltersComponent({ activeTab, paymentModeOptions }: FiltersProps) {
+  // Use selectors to only subscribe to needed state
+  const rawTransactions = useStore((state) => state.rawTransactions);
+  const filters = useStore((state) => state.filters);
+  const setFilters = useStore((state) => state.setFilters);
+  const resetFilters = useStore((state) => state.resetFilters);
 
   // Extract unique values for filters
   const filterOptions = useMemo(() => {
@@ -50,16 +54,53 @@ export function Filters({ activeTab, paymentModeOptions }: FiltersProps) {
     return { paymentModes, merchantIds };
   }, [rawTransactions, paymentModeOptions]);
 
-  const hasActiveFilters =
-    filters.dateRange.start ||
-    filters.dateRange.end ||
-    filters.paymentModes.length > 0 ||
-    filters.merchantIds.length > 0;
+  const hasActiveFilters = useMemo(
+    () =>
+      filters.dateRange.start ||
+      filters.dateRange.end ||
+      filters.paymentModes.length > 0 ||
+      filters.merchantIds.length > 0,
+    [filters.dateRange.start, filters.dateRange.end, filters.paymentModes.length, filters.merchantIds.length]
+  );
 
-  // Reset payment mode when tab changes
-  const handlePaymentModeChange = (selected: string[]) => {
-    setFilters({ paymentModes: selected });
-  };
+  // Memoize callbacks to prevent unnecessary re-renders
+  const handlePaymentModeChange = useCallback(
+    (selected: string[]) => {
+      setFilters({ paymentModes: selected });
+    },
+    [setFilters]
+  );
+
+  const handleMerchantIdChange = useCallback(
+    (selected: string[]) => {
+      setFilters({ merchantIds: selected });
+    },
+    [setFilters]
+  );
+
+  const handleStartDateChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setFilters({
+        dateRange: {
+          ...filters.dateRange,
+          start: e.target.value ? new Date(e.target.value) : null,
+        },
+      });
+    },
+    [setFilters, filters.dateRange]
+  );
+
+  const handleEndDateChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setFilters({
+        dateRange: {
+          ...filters.dateRange,
+          end: e.target.value ? new Date(e.target.value) : null,
+        },
+      });
+    },
+    [setFilters, filters.dateRange]
+  );
 
   return (
     <div className="sticky top-0 z-50 bg-card border-b border-border p-4 shadow-lg">
@@ -87,14 +128,7 @@ export function Filters({ activeTab, paymentModeOptions }: FiltersProps) {
                   ? format(filters.dateRange.start, 'yyyy-MM-dd')
                   : ''
               }
-              onChange={(e) =>
-                setFilters({
-                  dateRange: {
-                    ...filters.dateRange,
-                    start: e.target.value ? new Date(e.target.value) : null,
-                  },
-                })
-              }
+              onChange={handleStartDateChange}
               className="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
             />
           </div>
@@ -108,14 +142,7 @@ export function Filters({ activeTab, paymentModeOptions }: FiltersProps) {
                   ? format(filters.dateRange.end, 'yyyy-MM-dd')
                   : ''
               }
-              onChange={(e) =>
-                setFilters({
-                  dateRange: {
-                    ...filters.dateRange,
-                    end: e.target.value ? new Date(e.target.value) : null,
-                  },
-                })
-              }
+              onChange={handleEndDateChange}
               className="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
             />
           </div>
@@ -137,7 +164,7 @@ export function Filters({ activeTab, paymentModeOptions }: FiltersProps) {
               label="Merchant ID"
               options={filterOptions.merchantIds}
               value={filters.merchantIds}
-              onChange={(selected) => setFilters({ merchantIds: selected })}
+              onChange={handleMerchantIdChange}
               placeholder="Select merchant ID..."
             />
           </div>
@@ -147,5 +174,8 @@ export function Filters({ activeTab, paymentModeOptions }: FiltersProps) {
     </div>
   );
 }
+
+// Memoize Filters component to prevent unnecessary re-renders
+export const Filters = memo(FiltersComponent);
 
 

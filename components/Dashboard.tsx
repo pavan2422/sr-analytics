@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo, memo, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import { FileUpload } from '@/components/FileUpload';
 import { FileInfo } from '@/components/FileInfo';
@@ -14,24 +14,39 @@ import { cn } from '@/lib/utils';
 
 type Tab = 'overview' | 'upi' | 'cards' | 'netbanking' | 'rca';
 
+// Memoize tab components to prevent unnecessary re-renders
+const MemoizedOverviewTab = memo(OverviewTab);
+const MemoizedUPITab = memo(UPITab);
+const MemoizedCardsTab = memo(CardsTab);
+const MemoizedNetbankingTab = memo(NetbankingTab);
+const MemoizedRCATab = memo(RCATab);
+
 export function Dashboard() {
-  const { rawTransactions, setFilters } = useStore();
+  // Use selector to only subscribe to rawTransactions length
+  const rawTransactionsLength = useStore((state) => state.rawTransactions.length);
+  const setFilters = useStore((state) => state.setFilters);
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   
-  // Payment mode options based on active tab
-  const getPaymentModeOptions = (tab: Tab): string[] => {
-    if (tab === 'cards') {
-      return ['CREDIT_CARD', 'DEBIT_CARD', 'PREPAID_CARD'];
-    } else if (tab === 'upi') {
-      return ['UPI', 'UPI_CREDIT_CARD', 'UPI_PPI'];
-    } else if (tab === 'netbanking') {
-      return ['NET_BANKING'];
-    }
-    return []; // Overview and RCA show all
-  };
+  // Payment mode options based on active tab - memoized
+  const getPaymentModeOptions = useMemo(() => {
+    const options: Record<Tab, string[]> = {
+      cards: ['CREDIT_CARD', 'DEBIT_CARD', 'PREPAID_CARD'],
+      upi: ['UPI', 'UPI_CREDIT_CARD', 'UPI_PPI'],
+      netbanking: ['NET_BANKING'],
+      overview: [],
+      rca: [],
+    };
+    return (tab: Tab) => options[tab] || [];
+  }, []);
 
-  // Clear tab-specific filters when switching tabs
-  const handleTabChange = (tab: Tab) => {
+  // Memoize payment mode options for current tab
+  const paymentModeOptions = useMemo(
+    () => getPaymentModeOptions(activeTab),
+    [activeTab, getPaymentModeOptions]
+  );
+
+  // Clear tab-specific filters when switching tabs - memoized with useCallback
+  const handleTabChange = useCallback((tab: Tab) => {
     setActiveTab(tab);
     const tabPaymentModes = getPaymentModeOptions(tab);
     const { filters } = useStore.getState();
@@ -41,6 +56,7 @@ export function Dashboard() {
       ? filters.paymentModes.filter((pm) => tabPaymentModes.includes(pm))
       : filters.paymentModes; // Overview/RCA keep all
     
+    // Batch filter updates
     setFilters({ 
       paymentModes: validPaymentModes,
       pgs: [], 
@@ -48,7 +64,7 @@ export function Dashboard() {
       cardTypes: [],
       // Keep merchantIds when switching tabs
     });
-  };
+  }, [setFilters, getPaymentModeOptions]);
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'overview', label: 'Overview' },
@@ -79,14 +95,14 @@ export function Dashboard() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-6">
-        {rawTransactions.length === 0 ? (
+        {rawTransactionsLength === 0 ? (
           <div className="max-w-3xl mx-auto">
             <FileUpload />
           </div>
         ) : (
           <>
             {/* Global Filters */}
-            <Filters activeTab={activeTab} paymentModeOptions={getPaymentModeOptions(activeTab)} />
+            <Filters activeTab={activeTab} paymentModeOptions={paymentModeOptions} />
 
             {/* Tabs */}
             <div className="mt-6 border-b border-border">
@@ -110,11 +126,11 @@ export function Dashboard() {
 
             {/* Tab Content */}
             <div className="mt-6">
-              {activeTab === 'overview' && <OverviewTab />}
-              {activeTab === 'upi' && <UPITab />}
-              {activeTab === 'cards' && <CardsTab />}
-              {activeTab === 'netbanking' && <NetbankingTab />}
-              {activeTab === 'rca' && <RCATab />}
+              {activeTab === 'overview' && <MemoizedOverviewTab />}
+              {activeTab === 'upi' && <MemoizedUPITab />}
+              {activeTab === 'cards' && <MemoizedCardsTab />}
+              {activeTab === 'netbanking' && <MemoizedNetbankingTab />}
+              {activeTab === 'rca' && <MemoizedRCATab />}
             </div>
           </>
         )}

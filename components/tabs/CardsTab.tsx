@@ -11,7 +11,8 @@ import { GroupedMetrics, FailureRCA } from '@/types';
 import { formatNumber } from '@/lib/utils';
 
 export function CardsTab() {
-  const { filteredTransactions } = useStore();
+  // Use selector to only subscribe to filteredTransactions
+  const filteredTransactions = useStore((state) => state.filteredTransactions);
   const cardPaymentModes = ['CREDIT_CARD', 'DEBIT_CARD', 'PREPAID_CARD'];
 
   const cardMetrics = useMemo(() => {

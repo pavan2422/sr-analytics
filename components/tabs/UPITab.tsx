@@ -11,7 +11,8 @@ import { GroupedMetrics, FailureRCA } from '@/types';
 import { formatNumber } from '@/lib/utils';
 
 export function UPITab() {
-  const { filteredTransactions } = useStore();
+  // Use selector to only subscribe to filteredTransactions
+  const filteredTransactions = useStore((state) => state.filteredTransactions);
   const upiPaymentModes = ['UPI', 'UPI_CREDIT_CARD', 'UPI_PPI'];
 
   const upiMetrics = useMemo(() => {

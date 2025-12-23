@@ -13,7 +13,10 @@ import { detectProblematicCustomers } from '@/lib/customer-analytics';
 type PaymentMode = 'ALL' | 'UPI' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'PREPAID_CARD' | 'NETBANKING';
 
 export function RCATab() {
-  const { filteredTransactions, rawTransactions, filters } = useStore();
+  // Use selectors to only subscribe to needed state slices
+  const filteredTransactions = useStore((state) => state.filteredTransactions);
+  const rawTransactions = useStore((state) => state.rawTransactions);
+  const filters = useStore((state) => state.filters);
   const [periodDays, setPeriodDays] = useState(7);
   const [selectedPaymentMode, setSelectedPaymentMode] = useState<PaymentMode>('ALL');
 

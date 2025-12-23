@@ -9,7 +9,10 @@ import { formatNumber, formatCurrency, calculateSR } from '@/lib/utils';
 import { Transaction } from '@/types';
 
 export function OverviewTab() {
-  const { globalMetrics, dailyTrends, filteredTransactions } = useStore();
+  // Use selectors to only subscribe to needed state slices
+  const globalMetrics = useStore((state) => state.globalMetrics);
+  const dailyTrends = useStore((state) => state.dailyTrends);
+  const filteredTransactions = useStore((state) => state.filteredTransactions);
 
   // OPTIMIZED: Single pass computation for all metrics
   // This replaces 9 separate useMemo hooks that each iterated through all transactions

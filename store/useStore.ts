@@ -53,6 +53,35 @@ const defaultFilters: FilterState = {
 // Worker manager instance (shared across store)
 const workerManager = new WorkerManager();
 
+// Debounce and defer heavy computations
+let filterTimeout: ReturnType<typeof setTimeout> | null = null;
+let metricsTimeout: ReturnType<typeof setTimeout> | number | null = null;
+let isComputing = false;
+
+// Cancel pending filter computations
+const cancelPendingFilter = () => {
+  if (filterTimeout) {
+    clearTimeout(filterTimeout);
+    filterTimeout = null;
+  }
+};
+
+// Cancel pending metrics computations
+const cancelPendingMetrics = () => {
+  if (metricsTimeout) {
+    if (typeof metricsTimeout === 'number') {
+      // It's a requestAnimationFrame ID
+      if (typeof cancelAnimationFrame !== 'undefined') {
+        cancelAnimationFrame(metricsTimeout);
+      }
+    } else {
+      // It's a setTimeout ID
+      clearTimeout(metricsTimeout);
+    }
+    metricsTimeout = null;
+  }
+};
+
 export const useStore = create<StoreState>()(
   persist(
     (set, get) => ({
@@ -209,11 +238,19 @@ export const useStore = create<StoreState>()(
     set((state) => ({
       filters: { ...state.filters, ...newFilters },
     }));
-    get().applyFilters();
+    
+    // Debounce filter application to prevent excessive recomputations
+    cancelPendingFilter();
+    filterTimeout = setTimeout(() => {
+      get().applyFilters();
+      filterTimeout = null;
+    }, 150); // 150ms debounce
   },
   
   resetFilters: () => {
     set({ filters: defaultFilters });
+    cancelPendingFilter();
+    // Apply immediately for reset
     get().applyFilters();
   },
   
@@ -296,7 +333,31 @@ export const useStore = create<StoreState>()(
     }
     
     set({ filteredTransactions: filtered });
-    get().computeMetrics();
+    
+    // Defer metrics computation to next frame to keep UI responsive
+    cancelPendingMetrics();
+    
+    // Use requestAnimationFrame for better performance, fallback to setTimeout
+    if (typeof requestAnimationFrame !== 'undefined') {
+      const rafId = requestAnimationFrame(() => {
+        if (!isComputing) {
+          isComputing = true;
+          get().computeMetrics();
+          isComputing = false;
+        }
+        metricsTimeout = null;
+      });
+      metricsTimeout = rafId;
+    } else {
+      metricsTimeout = setTimeout(() => {
+        if (!isComputing) {
+          isComputing = true;
+          get().computeMetrics();
+          isComputing = false;
+        }
+        metricsTimeout = null;
+      }, 0);
+    }
   },
   
   computeMetrics: () => {
