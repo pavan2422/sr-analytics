@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import { Transaction, FilterState, Metrics, DailyTrend, GroupedMetrics, FailureRCA, RCAInsight, PeriodComparison } from '@/types';
 import { calculateSR, safeDivide } from '@/lib/utils';
 import { normalizeData, classifyUPIFlow } from '@/lib/data-normalization';
@@ -44,7 +45,9 @@ const defaultFilters: FilterState = {
   cardTypes: [],
 };
 
-export const useStore = create<StoreState>((set, get) => ({
+export const useStore = create<StoreState>()(
+  persist(
+    (set, get) => ({
   rawTransactions: [],
   isLoading: false,
   error: null,
@@ -337,5 +340,43 @@ export const useStore = create<StoreState>((set, get) => ({
   getFilteredTransactions: () => get().filteredTransactions,
   getGlobalMetrics: () => get().globalMetrics,
   getDailyTrends: () => get().dailyTrends,
-}));
+    }),
+    {
+      name: 'sr-analytics-storage',
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state) => ({
+        rawTransactions: state.rawTransactions,
+        fileNames: state.fileNames,
+        fileSizes: state.fileSizes,
+      }),
+      merge: (persistedState: any, currentState: StoreState) => {
+        if (persistedState && persistedState.rawTransactions) {
+          // Convert Date strings back to Date objects
+          const transactions = persistedState.rawTransactions.map((tx: any) => ({
+            ...tx,
+            txtime: tx.txtime instanceof Date ? tx.txtime : new Date(tx.txtime),
+          }));
+          return {
+            ...currentState,
+            ...persistedState,
+            rawTransactions: transactions,
+          };
+        }
+        return { ...currentState, ...persistedState };
+      },
+      onRehydrateStorage: () => (state) => {
+        // After rehydration, apply filters to recompute metrics
+        if (state && state.rawTransactions && state.rawTransactions.length > 0) {
+          // Use setTimeout to ensure state is fully rehydrated
+          setTimeout(() => {
+            const store = useStore.getState();
+            if (store.rawTransactions.length > 0) {
+              store.applyFilters();
+            }
+          }, 0);
+        }
+      },
+    }
+  )
+);
 

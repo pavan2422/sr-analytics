@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import Image from 'next/image';
 import { useStore } from '@/store/useStore';
 import { FileUpload } from '@/components/FileUpload';
 import { FileInfo } from '@/components/FileInfo';
@@ -65,23 +64,11 @@ export function Dashboard() {
       <header className="sticky top-0 z-50 bg-card border-b border-border shadow-lg">
         <div className="max-w-7xl mx-auto px-6 py-4">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-            <div className="flex items-center gap-4 flex-1 min-w-0">
-              <div className="flex-shrink-0">
-                <Image
-                  src="/logo.png"
-                  alt="SR Analytics Logo"
-                  width={48}
-                  height={48}
-                  className="object-contain"
-                  priority
-                />
-              </div>
-              <div className="flex-1 min-w-0">
-                <h1 className="text-xl sm:text-2xl font-bold">SR Analytics Dashboard</h1>
-                <p className="text-xs sm:text-sm text-muted-foreground mt-1">
-                  SR ANALYTICS TOOL - PRODUCT OPS
-                </p>
-              </div>
+            <div className="flex-1 min-w-0">
+              <h1 className="text-xl sm:text-2xl font-bold">SR Analytics Dashboard</h1>
+              <p className="text-xs sm:text-sm text-muted-foreground mt-1">
+                SR ANALYTICS TOOL - PRODUCT OPS
+              </p>
             </div>
             <div className="flex-shrink-0 w-full sm:w-auto">
               <FileInfo />
