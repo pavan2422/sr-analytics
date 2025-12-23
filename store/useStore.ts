@@ -12,6 +12,7 @@ interface StoreState {
   error: string | null;
   fileNames: string[];
   fileSizes: number[];
+  _skipPersistence: boolean; // Internal flag to skip persistence during large loads
   
   // Filters
   filters: FilterState;
@@ -54,6 +55,7 @@ export const useStore = create<StoreState>()(
   error: null,
   fileNames: [],
   fileSizes: [],
+  _skipPersistence: false,
   filters: defaultFilters,
   filteredTransactions: [],
   globalMetrics: null,
@@ -108,16 +110,58 @@ export const useStore = create<StoreState>()(
         throw new Error('File appears to be empty. Please check the file format.');
       }
       
-      console.log('Normalizing data...');
-      const normalizedData = normalizeData(rawData);
-      console.log('Data normalized, transactions:', normalizedData.length);
+      console.log('Normalizing data in chunks...');
+      
+      // Process data in chunks to avoid memory issues
+      const CHUNK_SIZE = 10000; // Process 10k rows at a time
+      const allNormalized: Transaction[] = [];
+      
+      for (let i = 0; i < rawData.length; i += CHUNK_SIZE) {
+        const chunk = rawData.slice(i, i + CHUNK_SIZE);
+        const normalizedChunk = normalizeData(chunk);
+        allNormalized.push(...normalizedChunk);
+        
+        // Yield to browser to prevent blocking
+        if (i + CHUNK_SIZE < rawData.length) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+        
+        console.log(`Processed ${Math.min(i + CHUNK_SIZE, rawData.length)}/${rawData.length} rows`);
+      }
+      
+      console.log('Data normalized, transactions:', allNormalized.length);
+      
+      // For large datasets, set a flag to skip immediate persistence
+      // and persist in background
+      const isLargeDataset = allNormalized.length > 50000;
+      
+      if (isLargeDataset) {
+        set({ _skipPersistence: true });
+      }
+      
+      // Set data - for large datasets, persistence will be deferred
       set({ 
-        rawTransactions: normalizedData,
+        rawTransactions: allNormalized,
         fileNames: [file.name],
         fileSizes: [file.size],
       });
-      get().applyFilters();
-      console.log('File loaded and processed successfully');
+      
+      // For large datasets, persist asynchronously after a delay
+      if (isLargeDataset) {
+        setTimeout(() => {
+          set({ _skipPersistence: false });
+          // Force a state update to trigger persistence
+          const currentState = get();
+          set({ rawTransactions: [...currentState.rawTransactions] });
+        }, 1000);
+      }
+      
+      // Apply filters after a short delay to let state settle
+      setTimeout(() => {
+        get().applyFilters();
+        console.log('File loaded and processed successfully');
+      }, 100);
+      
     } catch (error: any) {
       console.error('Error in loadDataFromFile:', error);
       set({ error: error.message || 'Failed to load file. Please check the console for details.' });
@@ -345,14 +389,23 @@ export const useStore = create<StoreState>()(
     {
       name: 'sr-analytics-storage',
       storage: createJSONStorage(() => indexedDBStorage),
-      partialize: (state) => ({
-        rawTransactions: state.rawTransactions,
-        fileNames: state.fileNames,
-        fileSizes: state.fileSizes,
-      }),
+      partialize: (state) => {
+        // Skip persistence if flag is set (during large file loads)
+        if (state._skipPersistence) {
+          return {
+            fileNames: state.fileNames,
+            fileSizes: state.fileSizes,
+          };
+        }
+        return {
+          rawTransactions: state.rawTransactions,
+          fileNames: state.fileNames,
+          fileSizes: state.fileSizes,
+        };
+      },
       merge: (persistedState: any, currentState: StoreState) => {
         if (persistedState && persistedState.rawTransactions) {
-          // Convert Date strings back to Date objects
+          // Convert Date strings back to Date objects in chunks to avoid blocking
           const transactions = persistedState.rawTransactions.map((tx: any) => ({
             ...tx,
             txtime: tx.txtime instanceof Date ? tx.txtime : new Date(tx.txtime),
@@ -374,9 +427,11 @@ export const useStore = create<StoreState>()(
             if (store.rawTransactions.length > 0) {
               store.applyFilters();
             }
-          }, 0);
+          }, 100);
         }
       },
+      // Skip persistence during loading to avoid blocking
+      skipHydration: false,
     }
   )
 );

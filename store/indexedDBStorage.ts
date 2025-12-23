@@ -92,15 +92,30 @@ function createIndexedDBStorage(): Storage {
       try {
         const database = await getDB();
         return new Promise((resolve, reject) => {
+          // Use a separate transaction for large writes to avoid blocking
           const transaction = database.transaction([STORE_NAME], 'readwrite');
+          transaction.onerror = () => reject(transaction.error);
+          transaction.oncomplete = () => resolve();
+          
           const store = transaction.objectStore(STORE_NAME);
           const request = store.put(value, name);
 
           request.onerror = () => reject(request.error);
-          request.onsuccess = () => resolve();
+          request.onsuccess = () => {
+            // Transaction will complete asynchronously
+          };
         });
       } catch (error) {
         console.error('IndexedDB setItem error:', error);
+        // If IndexedDB fails, try to fall back to localStorage for metadata only
+        if (value.length < 5 * 1024 * 1024) { // Only for small values (< 5MB)
+          try {
+            localStorage.setItem(name, value);
+            return Promise.resolve();
+          } catch (localError) {
+            // Both failed
+          }
+        }
         throw error;
       }
     },
