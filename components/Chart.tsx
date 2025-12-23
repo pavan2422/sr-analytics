@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, memo } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { DailyTrend } from '@/types';
 
@@ -10,7 +10,7 @@ interface ChartProps {
   height?: number;
 }
 
-export function Chart({ data, type = 'dual', height = 400 }: ChartProps) {
+function ChartComponent({ data, type = 'dual', height = 400 }: ChartProps) {
   const option = useMemo(() => {
     if (type === 'volume') {
       return {
@@ -191,5 +191,9 @@ export function Chart({ data, type = 'dual', height = 400 }: ChartProps) {
     />
   );
 }
+
+// Memoize to prevent unnecessary re-renders
+export const Chart = memo(ChartComponent);
+
 
 

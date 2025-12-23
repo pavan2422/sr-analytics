@@ -1,0 +1,19 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Dark navy blue background -->
+  <rect width="512" height="512" fill="#0a1929"/>
+  
+  <!-- Golden Yellow "I" -->
+  <rect x="180" y="120" width="60" height="272" rx="30" fill="#f59e0b"/>
+  
+  <!-- Vibrant Green "F" -->
+  <g>
+    <!-- Vertical stem -->
+    <rect x="280" y="120" width="60" height="272" rx="30" fill="#10b981"/>
+    <!-- Top horizontal stroke (curved) -->
+    <path d="M 340 120 Q 400 120 420 160 L 420 180 Q 400 200 360 200 L 340 200 Z" fill="#10b981"/>
+    <!-- Middle horizontal stroke -->
+    <rect x="340" y="240" width="60" height="30" rx="15" fill="#10b981"/>
+  </g>
+</svg>
+
+

@@ -9,10 +9,241 @@ import { formatNumber, formatCurrency, calculateSR } from '@/lib/utils';
 import { Transaction } from '@/types';
 
 export function OverviewTab() {
-  const { globalMetrics, dailyTrends, getFilteredTransactions } = useStore();
-  const filteredTransactions = getFilteredTransactions();
+  const { globalMetrics, dailyTrends, filteredTransactions } = useStore();
 
-  // 1. Transaction Status Distribution (Donut Chart)
+  // OPTIMIZED: Single pass computation for all metrics
+  // This replaces 9 separate useMemo hooks that each iterated through all transactions
+  const allMetrics = useMemo(() => {
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    
+    if (!filteredTransactions || filteredTransactions.length === 0) {
+      return {
+        statusDistribution: [],
+        paymentModeData: [],
+        hourlyData: Array.from({ length: 24 }, (_, hour) => ({
+          name: `${hour.toString().padStart(2, '0')}:00`,
+          volume: 0,
+          sr: 0,
+        })),
+        pgData: [],
+        failureReasonsData: [],
+        dayOfWeekData: dayNames.map((day: string) => ({ name: day, volume: 0, sr: 0 })),
+        amountDistributionData: [],
+        banksData: [],
+        scatterData: [],
+      };
+    }
+
+    try {
+      // Initialize all data structures
+      const modeMap = new Map<string, { success: number; total: number }>();
+      const hourMap = new Map<number, { success: number; total: number }>();
+      const pgMap = new Map<string, { success: number; total: number }>();
+      const failureMap = new Map<string, number>();
+      const dayMap = new Map<string, { success: number; total: number }>();
+      const bankMap = new Map<string, { success: number; total: number }>();
+      
+      const ranges = [
+        { name: '0-5000', min: 0, max: 5000 },
+        { name: '5000-10000', min: 5000, max: 10000 },
+        { name: '10000-25000', min: 10000, max: 25000 },
+        { name: '25000-100000', min: 25000, max: 100000 },
+        { name: '100000-200000', min: 100000, max: 200000 },
+      ];
+      const rangeMap = new Map<string, { success: number; total: number; gmv: number }>();
+
+      // SINGLE PASS through all transactions
+      for (const tx of filteredTransactions) {
+        // Parse date once and reuse
+        let txDate: Date | null = null;
+        let hour = 0;
+        let dayName = 'Unknown';
+        
+        if (tx.txtime instanceof Date) {
+          txDate = tx.txtime;
+          hour = txDate.getHours();
+          dayName = dayNames[txDate.getDay()];
+        } else if (tx.txtime) {
+          txDate = new Date(tx.txtime);
+          if (!isNaN(txDate.getTime())) {
+            hour = txDate.getHours();
+            dayName = dayNames[txDate.getDay()];
+          }
+        }
+
+        // 1. Payment Mode Performance
+        const mode = tx.paymentmode || 'Unknown';
+        if (!modeMap.has(mode)) {
+          modeMap.set(mode, { success: 0, total: 0 });
+        }
+        const modeStats = modeMap.get(mode)!;
+        modeStats.total++;
+        if (tx.isSuccess) modeStats.success++;
+
+        // 2. Hourly Trend Analysis
+        if (!hourMap.has(hour)) {
+          hourMap.set(hour, { success: 0, total: 0 });
+        }
+        const hourStats = hourMap.get(hour)!;
+        hourStats.total++;
+        if (tx.isSuccess) hourStats.success++;
+
+        // 3. Top PG Performance
+        const pg = tx.pg || 'Unknown';
+        if (pg !== 'N/A' && pg !== 'NA' && pg !== '') {
+          if (!pgMap.has(pg)) {
+            pgMap.set(pg, { success: 0, total: 0 });
+          }
+          const pgStats = pgMap.get(pg)!;
+          pgStats.total++;
+          if (tx.isSuccess) pgStats.success++;
+        }
+
+        // 4. Top Failure Reasons
+        if (tx.isFailed) {
+          const reason = tx.txmsg || 'Unknown';
+          failureMap.set(reason, (failureMap.get(reason) || 0) + 1);
+        }
+
+        // 5. Day of Week Analysis
+        if (!dayMap.has(dayName)) {
+          dayMap.set(dayName, { success: 0, total: 0 });
+        }
+        const dayStats = dayMap.get(dayName)!;
+        dayStats.total++;
+        if (tx.isSuccess) dayStats.success++;
+
+        // 6. Transaction Amount Distribution
+        const amount = tx.txamount || 0;
+        const range = ranges.find(r => amount >= r.min && amount < r.max);
+        const rangeName = range ? range.name : '200000+';
+        if (!rangeMap.has(rangeName)) {
+          rangeMap.set(rangeName, { success: 0, total: 0, gmv: 0 });
+        }
+        const rangeStats = rangeMap.get(rangeName)!;
+        rangeStats.total++;
+        if (tx.isSuccess) {
+          rangeStats.success++;
+          rangeStats.gmv += amount;
+        }
+
+        // 7. Top Banks Performance
+        const bank = tx.bankname || 'Unknown';
+        if (bank !== 'N/A' && bank !== 'NA' && bank !== '') {
+          if (!bankMap.has(bank)) {
+            bankMap.set(bank, { success: 0, total: 0 });
+          }
+          const bankStats = bankMap.get(bank)!;
+          bankStats.total++;
+          if (tx.isSuccess) bankStats.success++;
+        }
+      }
+
+      // Build results from maps
+      const paymentModeData = Array.from(modeMap.entries())
+        .map(([name, stats]) => ({
+          name,
+          volume: stats.total,
+          sr: calculateSR(stats.success, stats.total),
+        }))
+        .sort((a, b) => b.volume - a.volume);
+
+      const hourlyData = Array.from({ length: 24 }, (_, hour) => {
+        const stats = hourMap.get(hour) || { success: 0, total: 0 };
+        return {
+          name: `${hour.toString().padStart(2, '0')}:00`,
+          volume: stats.total,
+          sr: calculateSR(stats.success, stats.total),
+        };
+      });
+
+      const pgData = Array.from(pgMap.entries())
+        .map(([name, stats]) => ({
+          name,
+          volume: stats.total,
+          sr: calculateSR(stats.success, stats.total),
+        }))
+        .sort((a, b) => b.volume - a.volume)
+        .slice(0, 10);
+
+      const failureReasonsData = Array.from(failureMap.entries())
+        .map(([name, count]) => ({
+          name,
+          volume: count,
+        }))
+        .sort((a, b) => b.volume - a.volume)
+        .slice(0, 10);
+
+      const dayOfWeekData = dayNames.map((day) => {
+        const stats = dayMap.get(day) || { success: 0, total: 0 };
+        return {
+          name: day,
+          volume: stats.total,
+          sr: calculateSR(stats.success, stats.total),
+        };
+      });
+
+      const allRanges = [...ranges];
+      if (rangeMap.has('200000+')) {
+        allRanges.push({ name: '200000+', min: 200000, max: Infinity });
+      }
+      const amountDistributionData = allRanges.map((range) => {
+        const stats = rangeMap.get(range.name) || { success: 0, total: 0, gmv: 0 };
+        return {
+          name: `₹${range.name}`,
+          volume: stats.total,
+          gmv: stats.gmv,
+          sr: calculateSR(stats.success, stats.total),
+        };
+      });
+
+      const banksData = Array.from(bankMap.entries())
+        .map(([name, stats]) => ({
+          name,
+          volume: stats.total,
+          sr: calculateSR(stats.success, stats.total),
+        }))
+        .sort((a, b) => b.volume - a.volume)
+        .slice(0, 10);
+
+      const scatterData = paymentModeData.map((d) => ({
+        name: d.name,
+        volume: d.volume,
+        sr: d.sr || 0,
+      }));
+
+      return {
+        paymentModeData,
+        hourlyData,
+        pgData,
+        failureReasonsData,
+        dayOfWeekData,
+        amountDistributionData,
+        banksData,
+        scatterData,
+      };
+    } catch (error) {
+      console.error('Error computing metrics:', error);
+      // Return empty data on error to prevent crash
+      return {
+        statusDistribution: [],
+        paymentModeData: [],
+        hourlyData: Array.from({ length: 24 }, (_, hour) => ({
+          name: `${hour.toString().padStart(2, '0')}:00`,
+          volume: 0,
+          sr: 0,
+        })),
+        pgData: [],
+        failureReasonsData: [],
+        dayOfWeekData: dayNames.map((day: string) => ({ name: day, volume: 0, sr: 0 })),
+        amountDistributionData: [],
+        banksData: [],
+        scatterData: [],
+      };
+    }
+  }, [filteredTransactions]);
+
+  // Transaction Status Distribution (from globalMetrics - no need to recompute)
   const statusDistribution = useMemo(() => {
     if (!globalMetrics) return [];
     return [
@@ -22,190 +253,7 @@ export function OverviewTab() {
     ];
   }, [globalMetrics]);
 
-  // 2. Payment Mode Performance
-  const paymentModeData = useMemo(() => {
-    const modeMap = new Map<string, { success: number; total: number }>();
-    
-    filteredTransactions.forEach((tx: Transaction) => {
-      const mode = tx.paymentmode || 'Unknown';
-      if (!modeMap.has(mode)) {
-        modeMap.set(mode, { success: 0, total: 0 });
-      }
-      const stats = modeMap.get(mode)!;
-      stats.total++;
-      if (tx.isSuccess) stats.success++;
-    });
-
-    return Array.from(modeMap.entries())
-      .map(([name, stats]) => ({
-        name,
-        volume: stats.total,
-        sr: calculateSR(stats.success, stats.total),
-      }))
-      .sort((a, b) => b.volume - a.volume);
-  }, [filteredTransactions]);
-
-  // 3. Hourly Trend Analysis
-  const hourlyData = useMemo(() => {
-    const hourMap = new Map<number, { success: number; total: number }>();
-    
-    filteredTransactions.forEach((tx: Transaction) => {
-      let hour = 0;
-      if (tx.txtime instanceof Date) {
-        hour = tx.txtime.getHours();
-      } else if (tx.txtime) {
-        // Fallback: try to parse if it's a string
-        const date = new Date(tx.txtime);
-        if (!isNaN(date.getTime())) {
-          hour = date.getHours();
-        }
-      }
-      
-      if (!hourMap.has(hour)) {
-        hourMap.set(hour, { success: 0, total: 0 });
-      }
-      const stats = hourMap.get(hour)!;
-      stats.total++;
-      if (tx.isSuccess) stats.success++;
-    });
-
-    return Array.from({ length: 24 }, (_, hour) => {
-      const stats = hourMap.get(hour) || { success: 0, total: 0 };
-      return {
-        name: `${hour.toString().padStart(2, '0')}:00`,
-        volume: stats.total,
-        sr: calculateSR(stats.success, stats.total),
-      };
-    });
-  }, [filteredTransactions]);
-
-  // 4. Top PG Performance
-  const pgData = useMemo(() => {
-    const pgMap = new Map<string, { success: number; total: number }>();
-    
-    filteredTransactions.forEach((tx: Transaction) => {
-      const pg = tx.pg || 'Unknown';
-      if (pg === 'N/A' || pg === 'NA' || pg === '') return;
-      
-      if (!pgMap.has(pg)) {
-        pgMap.set(pg, { success: 0, total: 0 });
-      }
-      const stats = pgMap.get(pg)!;
-      stats.total++;
-      if (tx.isSuccess) stats.success++;
-    });
-
-    return Array.from(pgMap.entries())
-      .map(([name, stats]) => ({
-        name,
-        volume: stats.total,
-        sr: calculateSR(stats.success, stats.total),
-      }))
-      .sort((a, b) => b.volume - a.volume)
-      .slice(0, 10); // Top 10 PGs
-  }, [filteredTransactions]);
-
-  // 5. Top Failure Reasons
-  const failureReasonsData = useMemo(() => {
-    const failureMap = new Map<string, number>();
-    
-    filteredTransactions
-      .filter((tx: Transaction) => tx.isFailed)
-      .forEach((tx: Transaction) => {
-        const reason = tx.txmsg || 'Unknown';
-        failureMap.set(reason, (failureMap.get(reason) || 0) + 1);
-      });
-
-    return Array.from(failureMap.entries())
-      .map(([name, count]) => ({
-        name,
-        volume: count,
-      }))
-      .sort((a, b) => b.volume - a.volume)
-      .slice(0, 10); // Top 10 failure reasons
-  }, [filteredTransactions]);
-
-  // 6. Day of Week Analysis
-  const dayOfWeekData = useMemo(() => {
-    const dayMap = new Map<string, { success: number; total: number }>();
-    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    
-    filteredTransactions.forEach((tx: Transaction) => {
-      let dayName = 'Unknown';
-      if (tx.txtime instanceof Date) {
-        dayName = dayNames[tx.txtime.getDay()];
-      } else if (tx.txtime) {
-        const date = new Date(tx.txtime);
-        if (!isNaN(date.getTime())) {
-          dayName = dayNames[date.getDay()];
-        }
-      }
-      
-      if (!dayMap.has(dayName)) {
-        dayMap.set(dayName, { success: 0, total: 0 });
-      }
-      const stats = dayMap.get(dayName)!;
-      stats.total++;
-      if (tx.isSuccess) stats.success++;
-    });
-
-    return dayNames.map((day) => {
-      const stats = dayMap.get(day) || { success: 0, total: 0 };
-      return {
-        name: day,
-        volume: stats.total,
-        sr: calculateSR(stats.success, stats.total),
-      };
-    });
-  }, [filteredTransactions]);
-
-  // 7. Transaction Amount Distribution
-  const amountDistributionData = useMemo(() => {
-    const ranges = [
-      { name: '0-5000', min: 0, max: 5000 },
-      { name: '5000-10000', min: 5000, max: 10000 },
-      { name: '10000-25000', min: 10000, max: 25000 },
-      { name: '25000-100000', min: 25000, max: 100000 },
-      { name: '100000-200000', min: 100000, max: 200000 },
-    ];
-
-    const rangeMap = new Map<string, { success: number; total: number; gmv: number }>();
-    
-    filteredTransactions.forEach((tx: Transaction) => {
-      const amount = tx.txamount || 0;
-      // Find the matching range, or use the last range for amounts >= 200000
-      const range = ranges.find(r => amount >= r.min && amount < r.max);
-      const rangeName = range ? range.name : '200000+';
-      
-      if (!rangeMap.has(rangeName)) {
-        rangeMap.set(rangeName, { success: 0, total: 0, gmv: 0 });
-      }
-      const stats = rangeMap.get(rangeName)!;
-      stats.total++;
-      if (tx.isSuccess) {
-        stats.success++;
-        stats.gmv += amount;
-      }
-    });
-
-    // Include all defined ranges plus any overflow category
-    const allRanges = [...ranges];
-    if (rangeMap.has('200000+')) {
-      allRanges.push({ name: '200000+', min: 200000, max: Infinity });
-    }
-
-    return allRanges.map((range) => {
-      const stats = rangeMap.get(range.name) || { success: 0, total: 0, gmv: 0 };
-      return {
-        name: `₹${range.name}`,
-        volume: stats.total,
-        gmv: stats.gmv,
-        sr: calculateSR(stats.success, stats.total),
-      };
-    });
-  }, [filteredTransactions]);
-
-  // 8. SR Trend Over Time (from daily trends)
+  // SR Trend Over Time (from daily trends - already computed)
   const srTrendData = useMemo(() => {
     return dailyTrends.map((trend) => ({
       name: new Date(trend.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
@@ -214,40 +262,16 @@ export function OverviewTab() {
     }));
   }, [dailyTrends]);
 
-  // 9. Top Banks Performance
-  const banksData = useMemo(() => {
-    const bankMap = new Map<string, { success: number; total: number }>();
-    
-    filteredTransactions.forEach((tx: Transaction) => {
-      const bank = tx.bankname || 'Unknown';
-      if (bank === 'N/A' || bank === 'NA' || bank === '') return;
-      
-      if (!bankMap.has(bank)) {
-        bankMap.set(bank, { success: 0, total: 0 });
-      }
-      const stats = bankMap.get(bank)!;
-      stats.total++;
-      if (tx.isSuccess) stats.success++;
-    });
-
-    return Array.from(bankMap.entries())
-      .map(([name, stats]) => ({
-        name,
-        volume: stats.total,
-        sr: calculateSR(stats.success, stats.total),
-      }))
-      .sort((a, b) => b.volume - a.volume)
-      .slice(0, 10); // Top 10 banks
-  }, [filteredTransactions]);
-
-  // 10. Volume vs SR Correlation (by Payment Mode)
-  const scatterData = useMemo(() => {
-    return paymentModeData.map((d) => ({
-      name: d.name,
-      volume: d.volume,
-      sr: d.sr || 0,
-    }));
-  }, [paymentModeData]);
+  const {
+    paymentModeData,
+    hourlyData,
+    pgData,
+    failureReasonsData,
+    dayOfWeekData,
+    amountDistributionData,
+    banksData,
+    scatterData,
+  } = allMetrics;
 
   if (!globalMetrics) {
     return (

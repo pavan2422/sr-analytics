@@ -35,3 +35,4 @@ sips -s format png -z 192 192 "$SOURCE_IMAGE" --out public/android-chrome-192x19
 
 echo "✅ All favicon files generated successfully in public/ directory!"
 
+

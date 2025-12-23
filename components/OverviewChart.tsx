@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, memo } from 'react';
 import ReactECharts from 'echarts-for-react';
 
 interface DonutChartData {
@@ -39,7 +39,7 @@ interface OverviewChartProps {
   height?: number;
 }
 
-export function OverviewChart({ type, data, height = 400 }: OverviewChartProps) {
+function OverviewChartComponent({ type, data, height = 400 }: OverviewChartProps) {
   const option = useMemo(() => {
     if (type === 'donut') {
       const donutData = data as DonutChartData[];
@@ -716,4 +716,7 @@ export function OverviewChart({ type, data, height = 400 }: OverviewChartProps) 
     />
   );
 }
+
+// Memoize to prevent unnecessary re-renders
+export const OverviewChart = memo(OverviewChartComponent);
 
