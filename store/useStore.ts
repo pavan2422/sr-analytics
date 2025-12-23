@@ -18,6 +18,7 @@ interface StoreState {
   _skipPersistence: boolean; // Internal flag to skip persistence during large loads
   progress: ProcessingProgress | null; // Progress tracking for large files
   hasHydrated: boolean; // True after Zustand persist rehydration completes
+  analysisStage: 'FILTERING' | 'COMPUTING' | null; // UI hint for post-upload analysis work
   
   // Filters
   filters: FilterState;
@@ -96,6 +97,7 @@ export const useStore = create<StoreState>()(
   _skipPersistence: false,
   progress: null,
   hasHydrated: false,
+  analysisStage: null,
   filters: defaultFilters,
   filteredTransactions: [],
   globalMetrics: null,
@@ -107,7 +109,7 @@ export const useStore = create<StoreState>()(
   },
   
   loadDataFromFile: async (file: File) => {
-    set({ isLoading: true, error: null, progress: null });
+    set({ isLoading: true, error: null, progress: null, analysisStage: null });
     
     try {
       const fileSizeMB = file.size / 1024 / 1024;
@@ -250,7 +252,7 @@ export const useStore = create<StoreState>()(
     // Debounce filter application to prevent excessive recomputations
     cancelPendingFilter();
     filterTimeout = setTimeout(() => {
-      get().applyFilters();
+      void get().applyFilters();
       filterTimeout = null;
     }, 100); // 100ms debounce for faster response
   },
@@ -268,9 +270,12 @@ export const useStore = create<StoreState>()(
     const { rawTransactions, filters } = get();
     
     if (rawTransactions.length === 0) {
-      set({ filteredTransactions: [], globalMetrics: null, dailyTrends: [] });
+      set({ filteredTransactions: [], globalMetrics: null, dailyTrends: [], analysisStage: null });
       return;
     }
+
+    // Signal UI that we're doing heavy work post-upload / post-filter change
+    set({ analysisStage: 'FILTERING' });
 
     // IMPORTANT: Do NOT send huge arrays to Web Workers on every filter change.
     // Structured-clone of 100k+ objects blocks the main thread and causes lag / "no data" races.
@@ -300,6 +305,7 @@ export const useStore = create<StoreState>()(
 
     // Defer metrics computation
     cancelPendingMetrics();
+    set({ analysisStage: 'COMPUTING' });
     if (typeof requestAnimationFrame !== 'undefined') {
       const rafId = requestAnimationFrame(() => {
         if (!isComputing) {
@@ -328,7 +334,7 @@ export const useStore = create<StoreState>()(
     const { filteredTransactions } = get();
     
     if (filteredTransactions.length === 0) {
-      set({ globalMetrics: null, dailyTrends: [] });
+      set({ globalMetrics: null, dailyTrends: [], analysisStage: null });
       return;
     }
     
@@ -338,7 +344,7 @@ export const useStore = create<StoreState>()(
     // For very large datasets, chunking+yield is handled by applyFilters already, and
     // computeMetricsSync is a single pass; keep it synchronous for correctness/simplicity.
     const result = computeMetricsSync(filteredTransactions);
-    set({ globalMetrics: result.globalMetrics, dailyTrends: result.dailyTrends });
+    set({ globalMetrics: result.globalMetrics, dailyTrends: result.dailyTrends, analysisStage: null });
   },
   
   addDataFromFile: async (file: File) => {
@@ -439,6 +445,7 @@ export const useStore = create<StoreState>()(
       error: null,
       progress: null,
       filters: defaultFilters,
+      analysisStage: null,
     });
   },
   

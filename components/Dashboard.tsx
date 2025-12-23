@@ -34,12 +34,14 @@ export function Dashboard() {
   const rawTransactions = useStore((state) => state.rawTransactions);
   const isLoading = useStore((state) => state.isLoading);
   const hasHydrated = useStore((state) => state.hasHydrated);
+  const analysisStage = useStore((state) => state.analysisStage);
   const setFilters = useStore((state) => state.setFilters);
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   
   // Avoid flashing uploader during rehydrate: show uploader only after hydration completes.
   const hasData = rawTransactions.length > 0;
   const showUploader = hasHydrated && !isLoading && !hasData;
+  const showAnalyzingOverlay = hasData && !isLoading && analysisStage !== null;
   
   // Payment mode options based on active tab - memoized
   const getPaymentModeOptions = useMemo(() => {
@@ -115,6 +117,19 @@ export function Dashboard() {
           </div>
         ) : (
           <>
+            <div className="relative">
+              {showAnalyzingOverlay && (
+                <div className="absolute inset-0 z-30 flex items-center justify-center bg-background/80 backdrop-blur-sm rounded-lg">
+                  <div className="flex flex-col items-center text-center p-6">
+                    <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-primary mb-4" />
+                    <div className="text-base font-semibold">Analysing the SR, getting all the insights…</div>
+                    <div className="text-sm text-muted-foreground mt-2">
+                      {analysisStage === 'FILTERING' ? 'Filtering transactions…' : 'Computing metrics…'}
+                    </div>
+                  </div>
+                </div>
+              )}
+
             {/* Global Filters */}
             <Filters activeTab={activeTab} paymentModeOptions={paymentModeOptions} />
 
@@ -145,6 +160,7 @@ export function Dashboard() {
               {activeTab === 'cards' && <CardsTab />}
               {activeTab === 'netbanking' && <NetbankingTab />}
               {activeTab === 'rca' && <RCATab />}
+            </div>
             </div>
           </>
         )}
