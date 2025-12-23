@@ -35,13 +35,15 @@ export function Dashboard() {
   const isLoading = useStore((state) => state.isLoading);
   const hasHydrated = useStore((state) => state.hasHydrated);
   const analysisStage = useStore((state) => state.analysisStage);
+  const fileNames = useStore((state) => state.fileNames);
   const setFilters = useStore((state) => state.setFilters);
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   
   // Avoid flashing uploader during rehydrate: show uploader only after hydration completes.
   const hasData = rawTransactions.length > 0;
-  const showUploader = hasHydrated && !isLoading && !hasData;
+  const showUploader = hasHydrated && !isLoading && !hasData && (!fileNames || fileNames.length === 0);
   const showAnalyzingOverlay = hasData && !isLoading && analysisStage !== null;
+  const showRestoreHint = hasHydrated && !isLoading && !hasData && (fileNames?.length ?? 0) > 0;
   
   // Payment mode options based on active tab - memoized
   const getPaymentModeOptions = useMemo(() => {
@@ -111,9 +113,30 @@ export function Dashboard() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-6">
-        {showUploader ? (
+        {/* While a file is uploading/parsing/normalizing, always show the FileUpload progress UI */}
+        {isLoading ? (
           <div className="max-w-3xl mx-auto">
             <FileUpload />
+          </div>
+        ) : showUploader ? (
+          <div className="max-w-3xl mx-auto">
+            <FileUpload />
+          </div>
+        ) : showRestoreHint ? (
+          <div className="max-w-3xl mx-auto">
+            <div className="bg-card border border-border rounded-lg p-6">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary" />
+                <h2 className="text-lg font-semibold">Restoring dataset…</h2>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                We found your last uploaded file name (<span className="font-medium text-foreground">{fileNames[0]}</span>),
+                but the transaction rows aren’t available after refresh yet.
+              </p>
+              <p className="text-sm text-muted-foreground mt-2">
+                If the dashboard doesn’t come back in a few seconds, click <span className="font-medium">Replace</span> (top right) and re-upload the file.
+              </p>
+            </div>
           </div>
         ) : (
           <>

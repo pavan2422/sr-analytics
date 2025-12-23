@@ -214,12 +214,23 @@ export const useStore = create<StoreState>()(
       
       // For large datasets, persist asynchronously after a delay
       if (shouldSkipPersistence) {
+        // IMPORTANT: We still want persistence to happen quickly enough that refresh doesn't
+        // leave us with only file metadata. We flip the flag soon, then trigger persistence
+        // when the browser is idle (to reduce jank from JSON serialization).
         setTimeout(() => {
           set({ _skipPersistence: false });
-          // Force a state update to trigger persistence
-          const currentState = get();
-          set({ rawTransactions: [...currentState.rawTransactions] });
-        }, 1000);
+          const trigger = () => {
+            const currentState = get();
+            // Force a state update to trigger persistence
+            set({ rawTransactions: [...currentState.rawTransactions] });
+          };
+
+          if (typeof (window as any)?.requestIdleCallback === 'function') {
+            (window as any).requestIdleCallback(trigger, { timeout: 500 });
+          } else {
+            setTimeout(trigger, 0);
+          }
+        }, 200);
       }
       
       // Set progress first
