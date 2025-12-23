@@ -5,21 +5,30 @@ import { useStore } from '@/store/useStore';
 import { FileUpload } from '@/components/FileUpload';
 import { FileInfo } from '@/components/FileInfo';
 import { Filters } from '@/components/Filters';
-import { OverviewTab } from '@/components/tabs/OverviewTab';
-import { UPITab } from '@/components/tabs/UPITab';
-import { CardsTab } from '@/components/tabs/CardsTab';
-import { NetbankingTab } from '@/components/tabs/NetbankingTab';
-import { RCATab } from '@/components/tabs/RCATab';
+import dynamic from 'next/dynamic';
+import { memo } from 'react';
+
+// Lazy load tab components for code splitting
+const OverviewTab = dynamic(() => import('@/components/tabs/OverviewTab').then(mod => ({ default: mod.OverviewTab })), {
+  loading: () => <div className="flex items-center justify-center p-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div></div>,
+});
+const UPITab = dynamic(() => import('@/components/tabs/UPITab').then(mod => ({ default: mod.UPITab })), {
+  loading: () => <div className="flex items-center justify-center p-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div></div>,
+});
+const CardsTab = dynamic(() => import('@/components/tabs/CardsTab').then(mod => ({ default: mod.CardsTab })), {
+  loading: () => <div className="flex items-center justify-center p-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div></div>,
+});
+const NetbankingTab = dynamic(() => import('@/components/tabs/NetbankingTab').then(mod => ({ default: mod.NetbankingTab })), {
+  loading: () => <div className="flex items-center justify-center p-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div></div>,
+});
+const RCATab = dynamic(() => import('@/components/tabs/RCATab').then(mod => ({ default: mod.RCATab })), {
+  loading: () => <div className="flex items-center justify-center p-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div></div>,
+});
 import { cn } from '@/lib/utils';
 
 type Tab = 'overview' | 'upi' | 'cards' | 'netbanking' | 'rca';
 
-// Memoize tab components to prevent unnecessary re-renders
-const MemoizedOverviewTab = memo(OverviewTab);
-const MemoizedUPITab = memo(UPITab);
-const MemoizedCardsTab = memo(CardsTab);
-const MemoizedNetbankingTab = memo(NetbankingTab);
-const MemoizedRCATab = memo(RCATab);
+// Components are already lazy-loaded, no need for additional memoization
 
 export function Dashboard() {
   // Use selector to only subscribe to rawTransactions length
@@ -126,11 +135,11 @@ export function Dashboard() {
 
             {/* Tab Content */}
             <div className="mt-6">
-              {activeTab === 'overview' && <MemoizedOverviewTab />}
-              {activeTab === 'upi' && <MemoizedUPITab />}
-              {activeTab === 'cards' && <MemoizedCardsTab />}
-              {activeTab === 'netbanking' && <MemoizedNetbankingTab />}
-              {activeTab === 'rca' && <MemoizedRCATab />}
+              {activeTab === 'overview' && <OverviewTab />}
+              {activeTab === 'upi' && <UPITab />}
+              {activeTab === 'cards' && <CardsTab />}
+              {activeTab === 'netbanking' && <NetbankingTab />}
+              {activeTab === 'rca' && <RCATab />}
             </div>
           </>
         )}

@@ -8,7 +8,8 @@ import {
   ColumnDef,
   SortingState,
 } from '@tanstack/react-table';
-import { useState } from 'react';
+import { useState, useMemo, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { GroupedMetrics, FailureRCA } from '@/types';
 
 interface DataTableProps<T = GroupedMetrics> {
@@ -19,6 +20,7 @@ interface DataTableProps<T = GroupedMetrics> {
 
 export function DataTable<T = GroupedMetrics>({ data, columns, height = 400 }: DataTableProps<T>) {
   const [sorting, setSorting] = useState<SortingState>([]);
+  const parentRef = useRef<HTMLDivElement>(null);
 
   const table = useReactTable({
     data,
@@ -27,6 +29,18 @@ export function DataTable<T = GroupedMetrics>({ data, columns, height = 400 }: D
     onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
+  });
+
+  // Virtualization: Only render visible rows for tables with >50 rows
+  const shouldVirtualize = data.length > 50;
+  
+  const { rows } = table.getRowModel();
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 50, // Estimated row height
+    overscan: 10, // Render 10 extra rows for smooth scrolling
   });
 
   if (data.length === 0) {
@@ -42,6 +56,7 @@ export function DataTable<T = GroupedMetrics>({ data, columns, height = 400 }: D
 
   return (
     <div
+      ref={parentRef}
       className="border border-border rounded-lg bg-card overflow-auto"
       style={{ height }}
     >
@@ -82,28 +97,69 @@ export function DataTable<T = GroupedMetrics>({ data, columns, height = 400 }: D
             </tr>
           ))}
         </thead>
-        <tbody>
-          {table.getRowModel().rows.map((row) => {
-            return (
-              <tr
-                key={row.id}
-                className="border-b border-border hover:bg-muted/50 transition-colors"
-              >
-                {row.getVisibleCells().map((cell, cellIndex) => {
-                  // First column (usually text) = left align, others = right align
-                  const alignClass = cellIndex === 0 ? 'text-left' : 'text-right';
-                  return (
-                    <td
-                      key={cell.id}
-                      className={`py-3 px-4 text-sm ${alignClass}`}
-                    >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  );
-                })}
-              </tr>
-            );
-          })}
+        <tbody
+          style={{
+            height: shouldVirtualize ? `${virtualizer.getTotalSize()}px` : 'auto',
+            position: 'relative',
+          }}
+        >
+          {shouldVirtualize ? (
+            // Virtualized rendering for large tables
+            virtualizer.getVirtualItems().map((virtualRow) => {
+              const row = rows[virtualRow.index];
+              return (
+                <tr
+                  key={row.id}
+                  data-index={virtualRow.index}
+                  ref={virtualizer.measureElement}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
+                  className="border-b border-border hover:bg-muted/50 transition-colors"
+                >
+                  {row.getVisibleCells().map((cell, cellIndex) => {
+                    // First column (usually text) = left align, others = right align
+                    const alignClass = cellIndex === 0 ? 'text-left' : 'text-right';
+                    return (
+                      <td
+                        key={cell.id}
+                        className={`py-3 px-4 text-sm ${alignClass}`}
+                      >
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })
+          ) : (
+            // Regular rendering for small tables
+            rows.map((row) => {
+              return (
+                <tr
+                  key={row.id}
+                  className="border-b border-border hover:bg-muted/50 transition-colors"
+                >
+                  {row.getVisibleCells().map((cell, cellIndex) => {
+                    // First column (usually text) = left align, others = right align
+                    const alignClass = cellIndex === 0 ? 'text-left' : 'text-right';
+                    return (
+                      <td
+                        key={cell.id}
+                        className={`py-3 px-4 text-sm ${alignClass}`}
+                      >
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })
+          )}
         </tbody>
       </table>
     </div>

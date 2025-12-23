@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useCallback, memo } from 'react';
+import { useMemo, useCallback, memo, useState, useEffect } from 'react';
 import { useStore } from '@/store/useStore';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
@@ -17,6 +17,16 @@ function FiltersComponent({ activeTab, paymentModeOptions }: FiltersProps) {
   const filters = useStore((state) => state.filters);
   const setFilters = useStore((state) => state.setFilters);
   const resetFilters = useStore((state) => state.resetFilters);
+  
+  // Cleanup timeout on unmount
+  const [dateTimeout, setDateTimeout] = useState<NodeJS.Timeout | null>(null);
+  useEffect(() => {
+    return () => {
+      if (dateTimeout) {
+        clearTimeout(dateTimeout);
+      }
+    };
+  }, [dateTimeout]);
 
   // Extract unique values for filters
   const filterOptions = useMemo(() => {
@@ -78,28 +88,51 @@ function FiltersComponent({ activeTab, paymentModeOptions }: FiltersProps) {
     [setFilters]
   );
 
+  // Debounced date change handlers to prevent excessive filter updates
   const handleStartDateChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      setFilters({
-        dateRange: {
-          ...filters.dateRange,
-          start: e.target.value ? new Date(e.target.value) : null,
-        },
-      });
+      // Clear existing timeout
+      if (dateTimeout) {
+        clearTimeout(dateTimeout);
+      }
+      
+      // Debounce date changes (300ms for date inputs)
+      const timeout = setTimeout(() => {
+        setFilters({
+          dateRange: {
+            ...filters.dateRange,
+            start: e.target.value ? new Date(e.target.value) : null,
+          },
+        });
+        setDateTimeout(null);
+      }, 300);
+      
+      setDateTimeout(timeout);
     },
-    [setFilters, filters.dateRange]
+    [setFilters, filters.dateRange, dateTimeout]
   );
 
   const handleEndDateChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      setFilters({
-        dateRange: {
-          ...filters.dateRange,
-          end: e.target.value ? new Date(e.target.value) : null,
-        },
-      });
+      // Clear existing timeout
+      if (dateTimeout) {
+        clearTimeout(dateTimeout);
+      }
+      
+      // Debounce date changes (300ms for date inputs)
+      const timeout = setTimeout(() => {
+        setFilters({
+          dateRange: {
+            ...filters.dateRange,
+            end: e.target.value ? new Date(e.target.value) : null,
+          },
+        });
+        setDateTimeout(null);
+      }, 300);
+      
+      setDateTimeout(timeout);
     },
-    [setFilters, filters.dateRange]
+    [setFilters, filters.dateRange, dateTimeout]
   );
 
   return (
