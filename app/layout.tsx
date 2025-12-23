@@ -3,7 +3,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'SR Analytics Dashboard',
-  description: 'Production-grade Success Rate Analytics Dashboard',
+  description: 'SR ANALYTICS TOOL - PRODUCT OPS',
 };
 
 export default function RootLayout({
