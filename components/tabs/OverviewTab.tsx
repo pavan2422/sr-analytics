@@ -162,12 +162,9 @@ export function OverviewTab() {
   // 7. Transaction Amount Distribution
   const amountDistributionData = useMemo(() => {
     const ranges = [
-      { name: '0-100', min: 0, max: 100 },
-      { name: '100-500', min: 100, max: 500 },
-      { name: '500-1000', min: 500, max: 1000 },
-      { name: '1000-5000', min: 1000, max: 5000 },
-      { name: '5000-10000', min: 5000, max: 10000 },
-      { name: '10000+', min: 10000, max: Infinity },
+      { name: '10000-50000', min: 10000, max: 50000 },
+      { name: '50000-100000', min: 50000, max: 100000 },
+      { name: '100000+', min: 100000, max: Infinity },
     ];
 
     const rangeMap = new Map<string, { success: number; total: number; gmv: number }>();
