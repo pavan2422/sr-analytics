@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 
 export function FileUpload() {
   const [isDragging, setIsDragging] = useState(false);
-  const { loadDataFromFile, isLoading, error } = useStore();
+  const { loadDataFromFile, isLoading, error, progress } = useStore();
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -66,9 +66,37 @@ export function FileUpload() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center p-12 border-2 border-dashed border-border rounded-lg bg-card">
-        <div className="text-center">
+        <div className="text-center w-full max-w-md">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-          <p className="text-muted-foreground">Processing file...</p>
+          <p className="text-muted-foreground mb-4">
+            {progress?.stage === 'reading' && 'Reading file...'}
+            {progress?.stage === 'parsing' && 'Parsing file...'}
+            {progress?.stage === 'normalizing' && 'Normalizing data...'}
+            {!progress && 'Processing file...'}
+          </p>
+          {progress && (
+            <div className="w-full">
+              <div className="flex justify-between text-sm text-muted-foreground mb-2">
+                <span>
+                  {progress.stage === 'reading' && 'Reading'}
+                  {progress.stage === 'parsing' && 'Parsing'}
+                  {progress.stage === 'normalizing' && 'Normalizing'}
+                </span>
+                <span>{progress.percentage.toFixed(0)}%</span>
+              </div>
+              <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-primary h-full transition-all duration-300"
+                  style={{ width: `${progress.percentage}%` }}
+                />
+              </div>
+              {progress.processed > 0 && progress.total > 0 && (
+                <p className="text-xs text-muted-foreground mt-2">
+                  {progress.processed.toLocaleString()} / {progress.total.toLocaleString()} rows
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );

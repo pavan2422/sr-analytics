@@ -4,6 +4,8 @@ import { Transaction, FilterState, Metrics, DailyTrend, GroupedMetrics, FailureR
 import { calculateSR, safeDivide } from '@/lib/utils';
 import { normalizeData, classifyUPIFlow } from '@/lib/data-normalization';
 import { indexedDBStorage } from './indexedDBStorage';
+import { streamCSVFile, processExcelFile, ProcessingProgress } from '@/lib/file-processor';
+import { WorkerManager } from '@/lib/worker-manager';
 
 interface StoreState {
   // Raw data
@@ -13,6 +15,7 @@ interface StoreState {
   fileNames: string[];
   fileSizes: number[];
   _skipPersistence: boolean; // Internal flag to skip persistence during large loads
+  progress: ProcessingProgress | null; // Progress tracking for large files
   
   // Filters
   filters: FilterState;
@@ -47,6 +50,9 @@ const defaultFilters: FilterState = {
   cardTypes: [],
 };
 
+// Worker manager instance (shared across store)
+const workerManager = new WorkerManager();
+
 export const useStore = create<StoreState>()(
   persist(
     (set, get) => ({
@@ -56,6 +62,7 @@ export const useStore = create<StoreState>()(
   fileNames: [],
   fileSizes: [],
   _skipPersistence: false,
+  progress: null,
   filters: defaultFilters,
   filteredTransactions: [],
   globalMetrics: null,
@@ -67,40 +74,53 @@ export const useStore = create<StoreState>()(
   },
   
   loadDataFromFile: async (file: File) => {
-    set({ isLoading: true, error: null });
+    set({ isLoading: true, error: null, progress: null });
     
     try {
-      console.log('Loading file:', file.name, 'Size:', file.size);
+      const fileSizeMB = file.size / 1024 / 1024;
+      console.log('Loading file:', file.name, 'Size:', fileSizeMB.toFixed(2), 'MB');
+      
+      // Warn for very large files
+      if (fileSizeMB > 500) {
+        console.warn('Very large file detected. Processing may take several minutes.');
+      }
+      
+      // Check browser memory limits (rough estimate)
+      if (fileSizeMB > 2000) {
+        throw new Error('File is too large (>2GB). Please split your data into smaller files (recommended: <500MB per file).');
+      }
+      
       const fileExtension = file.name.split('.').pop()?.toLowerCase();
       let rawData: any[] = [];
       
+      // Use streaming for large files (>100MB)
+      const isLargeFile = file.size > 100 * 1024 * 1024;
+      const progressCallback = (progress: ProcessingProgress) => {
+        set({ progress });
+      };
+      
       if (fileExtension === 'csv') {
-        console.log('Parsing CSV file...');
-        const Papa = (await import('papaparse')).default;
-        const text = await file.text();
-        const result = Papa.parse(text, {
-          header: true,
-          skipEmptyLines: true,
-          transformHeader: (header) => header.trim().toLowerCase(),
-        });
-        rawData = result.data as any[];
+        console.log('Parsing CSV file...', isLargeFile ? '(streaming mode)' : '(standard mode)');
+        
+        if (isLargeFile) {
+          // Use streaming parser for large files
+          rawData = await streamCSVFile(file, progressCallback);
+        } else {
+          // Standard parsing for smaller files
+          const Papa = (await import('papaparse')).default;
+          const text = await file.text();
+          const result = Papa.parse(text, {
+            header: true,
+            skipEmptyLines: true,
+            transformHeader: (header) => header.trim().toLowerCase(),
+          });
+          rawData = result.data as any[];
+          set({ progress: { processed: rawData.length, total: rawData.length, percentage: 50, stage: 'parsing' } });
+        }
         console.log('CSV parsed, rows:', rawData.length);
       } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
         console.log('Parsing Excel file...');
-        const XLSX = (await import('xlsx')).default;
-        const arrayBuffer = await file.arrayBuffer();
-        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-        const jsonData = XLSX.utils.sheet_to_json(worksheet);
-        // Normalize Excel headers to lowercase (like CSV)
-        rawData = jsonData.map((row: any) => {
-          const normalized: any = {};
-          Object.keys(row).forEach((key) => {
-            normalized[key.toLowerCase().trim()] = row[key];
-          });
-          return normalized;
-        });
+        rawData = await processExcelFile(file, progressCallback);
         console.log('Excel parsed, rows:', rawData.length);
       } else {
         throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
@@ -110,32 +130,42 @@ export const useStore = create<StoreState>()(
         throw new Error('File appears to be empty. Please check the file format.');
       }
       
-      console.log('Normalizing data in chunks...');
+      console.log('Normalizing data...');
+      set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
       
-      // Process data in chunks to avoid memory issues
-      const CHUNK_SIZE = 10000; // Process 10k rows at a time
-      const allNormalized: Transaction[] = [];
+      // Process data in chunks using worker manager (which uses main thread with chunking)
+      // This approach is memory-efficient and prevents UI blocking
+      const isLargeDataset = rawData.length > 50000;
+      let allNormalized: Transaction[] = [];
       
-      for (let i = 0; i < rawData.length; i += CHUNK_SIZE) {
-        const chunk = rawData.slice(i, i + CHUNK_SIZE);
-        const normalizedChunk = normalizeData(chunk);
-        allNormalized.push(...normalizedChunk);
-        
-        // Yield to browser to prevent blocking
-        if (i + CHUNK_SIZE < rawData.length) {
-          await new Promise(resolve => setTimeout(resolve, 0));
+      try {
+        // Use worker manager which handles chunking efficiently
+        allNormalized = await workerManager.processData(
+          rawData,
+          (progress) => {
+            // Adjust percentage to fit in 60-90% range
+            progressCallback({
+              ...progress,
+              percentage: 60 + Math.round((progress.percentage / 100) * 30),
+            });
+          },
+          isLargeDataset ? 10000 : 20000 // Smaller chunks for very large datasets
+        );
+      } catch (error: any) {
+        console.error('Error processing data:', error);
+        // If processing fails due to memory, provide helpful error
+        if (error.message?.includes('memory') || error.message?.includes('quota')) {
+          throw new Error('File is too large to process. Please try a smaller file or split your data into multiple files.');
         }
-        
-        console.log(`Processed ${Math.min(i + CHUNK_SIZE, rawData.length)}/${rawData.length} rows`);
+        throw error;
       }
       
       console.log('Data normalized, transactions:', allNormalized.length);
       
       // For large datasets, set a flag to skip immediate persistence
-      // and persist in background
-      const isLargeDataset = allNormalized.length > 50000;
+      const shouldSkipPersistence = allNormalized.length > 50000;
       
-      if (isLargeDataset) {
+      if (shouldSkipPersistence) {
         set({ _skipPersistence: true });
       }
       
@@ -144,10 +174,11 @@ export const useStore = create<StoreState>()(
         rawTransactions: allNormalized,
         fileNames: [file.name],
         fileSizes: [file.size],
+        progress: { processed: allNormalized.length, total: allNormalized.length, percentage: 95, stage: 'complete' },
       });
       
       // For large datasets, persist asynchronously after a delay
-      if (isLargeDataset) {
+      if (shouldSkipPersistence) {
         setTimeout(() => {
           set({ _skipPersistence: false });
           // Force a state update to trigger persistence
@@ -159,12 +190,16 @@ export const useStore = create<StoreState>()(
       // Apply filters after a short delay to let state settle
       setTimeout(() => {
         get().applyFilters();
+        set({ progress: { processed: allNormalized.length, total: allNormalized.length, percentage: 100, stage: 'complete' } });
         console.log('File loaded and processed successfully');
       }, 100);
       
     } catch (error: any) {
       console.error('Error in loadDataFromFile:', error);
-      set({ error: error.message || 'Failed to load file. Please check the console for details.' });
+      set({ 
+        error: error.message || 'Failed to load file. Please check the console for details.',
+        progress: null,
+      });
     } finally {
       set({ isLoading: false });
     }
@@ -185,58 +220,79 @@ export const useStore = create<StoreState>()(
   applyFilters: () => {
     const { rawTransactions, filters } = get();
     
-    let filtered = [...rawTransactions];
-    
-    // Remove records where PG = 'N/A'
-    filtered = filtered.filter((tx) => {
-      const pg = String(tx.pg || '').trim().toUpperCase();
-      return pg !== 'N/A' && pg !== 'NA' && pg !== '';
-    });
-    
-    // Date range filter
-    if (filters.dateRange.start) {
-      filtered = filtered.filter(
-        (tx) => tx.txtime >= filters.dateRange.start!
-      );
-    }
-    if (filters.dateRange.end) {
-      const endDate = new Date(filters.dateRange.end);
+    // Optimize: Use single pass filtering instead of multiple filter calls
+    // This avoids creating multiple intermediate arrays
+    const filtered: Transaction[] = [];
+    const endDate = filters.dateRange.end ? new Date(filters.dateRange.end) : null;
+    if (endDate) {
       endDate.setHours(23, 59, 59, 999);
-      filtered = filtered.filter((tx) => tx.txtime <= endDate);
     }
     
-    // Payment mode filter
-    if (filters.paymentModes.length > 0) {
-      filtered = filtered.filter((tx) =>
-        filters.paymentModes.includes(tx.paymentmode)
-      );
-    }
+    // Pre-compute filter sets for O(1) lookup
+    const paymentModeSet = filters.paymentModes.length > 0 
+      ? new Set(filters.paymentModes) 
+      : null;
+    const merchantIdSet = filters.merchantIds.length > 0 
+      ? new Set(filters.merchantIds) 
+      : null;
+    const pgSet = filters.pgs.length > 0 
+      ? new Set(filters.pgs) 
+      : null;
+    const bankSet = filters.banks.length > 0 
+      ? new Set(filters.banks) 
+      : null;
+    const cardTypeSet = filters.cardTypes.length > 0 
+      ? new Set(filters.cardTypes) 
+      : null;
     
-    // Merchant ID filter
-    if (filters.merchantIds.length > 0) {
-      filtered = filtered.filter((tx) => {
+    // Single pass filtering
+    for (const tx of rawTransactions) {
+      // Remove records where PG = 'N/A'
+      const pg = String(tx.pg || '').trim().toUpperCase();
+      if (pg === 'N/A' || pg === 'NA' || pg === '') {
+        continue;
+      }
+      
+      // Date range filter
+      if (filters.dateRange.start && tx.txtime < filters.dateRange.start) {
+        continue;
+      }
+      if (endDate && tx.txtime > endDate) {
+        continue;
+      }
+      
+      // Payment mode filter
+      if (paymentModeSet && !paymentModeSet.has(tx.paymentmode)) {
+        continue;
+      }
+      
+      // Merchant ID filter
+      if (merchantIdSet) {
         const merchantId = String(tx.merchantid || '').trim();
-        return filters.merchantIds.includes(merchantId);
-      });
-    }
-    
-    // PG filter
-    if (filters.pgs.length > 0) {
-      filtered = filtered.filter((tx) => filters.pgs.includes(tx.pg));
-    }
-    
-    // Bank filter (for UPI, this filters by INTENT/COLLECT classification)
-    if (filters.banks.length > 0) {
-      filtered = filtered.filter((tx) => {
+        if (!merchantIdSet.has(merchantId)) {
+          continue;
+        }
+      }
+      
+      // PG filter
+      if (pgSet && !pgSet.has(tx.pg)) {
+        continue;
+      }
+      
+      // Bank filter (for UPI, this filters by INTENT/COLLECT classification)
+      if (bankSet) {
         const flow = classifyUPIFlow(tx.bankname);
-        // Match if selected bank is the flow type (INTENT/COLLECT) or actual bankname
-        return filters.banks.includes(flow) || filters.banks.includes(tx.bankname);
-      });
-    }
-    
-    // Card type filter
-    if (filters.cardTypes.length > 0) {
-      filtered = filtered.filter((tx) => filters.cardTypes.includes(tx.cardtype));
+        if (!bankSet.has(flow) && !bankSet.has(tx.bankname)) {
+          continue;
+        }
+      }
+      
+      // Card type filter
+      if (cardTypeSet && !cardTypeSet.has(tx.cardtype)) {
+        continue;
+      }
+      
+      filtered.push(tx);
     }
     
     set({ filteredTransactions: filtered });
@@ -251,30 +307,26 @@ export const useStore = create<StoreState>()(
       return;
     }
     
-    // Compute global metrics
-    const totalCount = filteredTransactions.length;
-    const successCount = filteredTransactions.filter((tx) => tx.isSuccess).length;
-    const failedCount = filteredTransactions.filter((tx) => tx.isFailed).length;
-    const userDroppedCount = filteredTransactions.filter((tx) => tx.isUserDropped).length;
-    const successGmv = filteredTransactions
-      .filter((tx) => tx.isSuccess)
-      .reduce((sum, tx) => sum + tx.txamount, 0);
-    
-    const metrics: Metrics = {
-      totalCount,
-      successCount,
-      failedCount,
-      userDroppedCount,
-      sr: calculateSR(successCount, totalCount),
-      successGmv,
-      failedPercent: calculateSR(failedCount, totalCount),
-      userDroppedPercent: calculateSR(userDroppedCount, totalCount),
-    };
-    
-    // Compute daily trends
+    // Optimize: Single pass computation instead of multiple filter/reduce calls
+    let successCount = 0;
+    let failedCount = 0;
+    let userDroppedCount = 0;
+    let successGmv = 0;
     const dailyMap = new Map<string, DailyTrend>();
     
-    filteredTransactions.forEach((tx) => {
+    // Single pass through transactions
+    for (const tx of filteredTransactions) {
+      // Count statuses
+      if (tx.isSuccess) {
+        successCount++;
+        successGmv += tx.txamount;
+      } else if (tx.isFailed) {
+        failedCount++;
+      } else if (tx.isUserDropped) {
+        userDroppedCount++;
+      }
+      
+      // Aggregate daily trends
       const date = tx.transactionDate;
       if (!dailyMap.has(date)) {
         dailyMap.set(date, {
@@ -292,7 +344,20 @@ export const useStore = create<StoreState>()(
       if (tx.isSuccess) trend.successCount++;
       if (tx.isFailed) trend.failedCount++;
       if (tx.isUserDropped) trend.userDroppedCount++;
-    });
+    }
+    
+    const totalCount = filteredTransactions.length;
+    
+    const metrics: Metrics = {
+      totalCount,
+      successCount,
+      failedCount,
+      userDroppedCount,
+      sr: calculateSR(successCount, totalCount),
+      successGmv,
+      failedPercent: calculateSR(failedCount, totalCount),
+      userDroppedPercent: calculateSR(userDroppedCount, totalCount),
+    };
     
     // Calculate SR for each day
     const dailyTrends = Array.from(dailyMap.values())
@@ -306,40 +371,41 @@ export const useStore = create<StoreState>()(
   },
   
   addDataFromFile: async (file: File) => {
-    set({ isLoading: true, error: null });
+    set({ isLoading: true, error: null, progress: null });
     
     try {
-      console.log('Adding file:', file.name, 'Size:', file.size);
+      const fileSizeMB = file.size / 1024 / 1024;
+      console.log('Adding file:', file.name, 'Size:', fileSizeMB.toFixed(2), 'MB');
+      
+      if (fileSizeMB > 2000) {
+        throw new Error('File is too large (>2GB). Please split your data into smaller files.');
+      }
+      
       const fileExtension = file.name.split('.').pop()?.toLowerCase();
       let rawData: any[] = [];
       
+      const progressCallback = (progress: ProcessingProgress) => {
+        set({ progress });
+      };
+      
       if (fileExtension === 'csv') {
-        console.log('Parsing CSV file...');
-        const Papa = (await import('papaparse')).default;
-        const text = await file.text();
-        const result = Papa.parse(text, {
-          header: true,
-          skipEmptyLines: true,
-          transformHeader: (header) => header.trim().toLowerCase(),
-        });
-        rawData = result.data as any[];
+        const isLargeFile = file.size > 100 * 1024 * 1024;
+        if (isLargeFile) {
+          rawData = await streamCSVFile(file, progressCallback);
+        } else {
+          const Papa = (await import('papaparse')).default;
+          const text = await file.text();
+          const result = Papa.parse(text, {
+            header: true,
+            skipEmptyLines: true,
+            transformHeader: (header) => header.trim().toLowerCase(),
+          });
+          rawData = result.data as any[];
+          set({ progress: { processed: rawData.length, total: rawData.length, percentage: 50, stage: 'parsing' } });
+        }
         console.log('CSV parsed, rows:', rawData.length);
       } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
-        console.log('Parsing Excel file...');
-        const XLSX = (await import('xlsx')).default;
-        const arrayBuffer = await file.arrayBuffer();
-        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-        const jsonData = XLSX.utils.sheet_to_json(worksheet);
-        // Normalize Excel headers to lowercase (like CSV)
-        rawData = jsonData.map((row: any) => {
-          const normalized: any = {};
-          Object.keys(row).forEach((key) => {
-            normalized[key.toLowerCase().trim()] = row[key];
-          });
-          return normalized;
-        });
+        rawData = await processExcelFile(file, progressCallback);
         console.log('Excel parsed, rows:', rawData.length);
       } else {
         throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
@@ -350,7 +416,20 @@ export const useStore = create<StoreState>()(
       }
       
       console.log('Normalizing data...');
-      const normalizedData = normalizeData(rawData);
+      set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
+      
+      // Process in chunks
+      const normalizedData = await workerManager.processData(
+        rawData,
+        (progress) => {
+          progressCallback({
+            ...progress,
+            percentage: 60 + Math.round((progress.percentage / 100) * 30),
+          });
+        },
+        rawData.length > 50000 ? 10000 : 20000
+      );
+      
       console.log('Data normalized, transactions:', normalizedData.length);
       
       const { rawTransactions, fileNames, fileSizes } = get();
@@ -358,18 +437,27 @@ export const useStore = create<StoreState>()(
         rawTransactions: [...rawTransactions, ...normalizedData],
         fileNames: [...fileNames, file.name],
         fileSizes: [...fileSizes, file.size],
+        progress: { processed: normalizedData.length, total: normalizedData.length, percentage: 100, stage: 'complete' },
       });
-      get().applyFilters();
-      console.log('File added and processed successfully');
+      
+      setTimeout(() => {
+        get().applyFilters();
+        console.log('File added and processed successfully');
+      }, 100);
     } catch (error: any) {
       console.error('Error in addDataFromFile:', error);
-      set({ error: error.message || 'Failed to add file. Please check the console for details.' });
+      set({ 
+        error: error.message || 'Failed to add file. Please check the console for details.',
+        progress: null,
+      });
     } finally {
       set({ isLoading: false });
     }
   },
   
   clearData: () => {
+    // Cancel any ongoing worker processing
+    workerManager.cancel();
     set({
       rawTransactions: [],
       filteredTransactions: [],
@@ -378,6 +466,7 @@ export const useStore = create<StoreState>()(
       fileNames: [],
       fileSizes: [],
       error: null,
+      progress: null,
       filters: defaultFilters,
     });
   },
