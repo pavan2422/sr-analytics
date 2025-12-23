@@ -1,0 +1,151 @@
+'use client';
+
+import { useMemo } from 'react';
+import { useStore } from '@/store/useStore';
+import { cn } from '@/lib/utils';
+import { format } from 'date-fns';
+import { MultiSelect } from '@/components/MultiSelect';
+
+interface FiltersProps {
+  activeTab?: string;
+  paymentModeOptions?: string[];
+}
+
+export function Filters({ activeTab, paymentModeOptions }: FiltersProps) {
+  const { rawTransactions, filters, setFilters, resetFilters } = useStore();
+
+  // Extract unique values for filters
+  const filterOptions = useMemo(() => {
+    if (rawTransactions.length === 0) {
+      return {
+        paymentModes: [],
+        merchantIds: [],
+      };
+    }
+
+    // If paymentModeOptions provided (tab-specific), use those; otherwise show all
+    let paymentModes: string[];
+    if (paymentModeOptions && paymentModeOptions.length > 0) {
+      // Filter to only show payment modes that exist in data and match tab options
+      const availableModes = Array.from(
+        new Set(rawTransactions.map((tx) => tx.paymentmode).filter(Boolean))
+      );
+      paymentModes = paymentModeOptions.filter((mode) => availableModes.includes(mode));
+    } else {
+      // Overview/RCA: show all payment modes
+      paymentModes = Array.from(
+        new Set(rawTransactions.map((tx) => tx.paymentmode).filter(Boolean))
+      ).sort();
+    }
+
+    // Extract unique merchant IDs
+    const merchantIds = Array.from(
+      new Set(
+        rawTransactions
+          .map((tx) => String(tx.merchantid || '').trim())
+          .filter((id) => id !== '')
+      )
+    ).sort();
+
+    return { paymentModes, merchantIds };
+  }, [rawTransactions, paymentModeOptions]);
+
+  const hasActiveFilters =
+    filters.dateRange.start ||
+    filters.dateRange.end ||
+    filters.paymentModes.length > 0 ||
+    filters.merchantIds.length > 0;
+
+  // Reset payment mode when tab changes
+  const handlePaymentModeChange = (selected: string[]) => {
+    setFilters({ paymentModes: selected });
+  };
+
+  return (
+    <div className="sticky top-0 z-50 bg-card border-b border-border p-4 shadow-lg">
+      <div className="max-w-7xl mx-auto">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">Filters</h2>
+          {hasActiveFilters && (
+            <button
+              onClick={resetFilters}
+              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Clear All
+            </button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* Date Range */}
+          <div>
+            <label className="block text-sm font-medium mb-2">Start Date</label>
+            <input
+              type="date"
+              value={
+                filters.dateRange.start
+                  ? format(filters.dateRange.start, 'yyyy-MM-dd')
+                  : ''
+              }
+              onChange={(e) =>
+                setFilters({
+                  dateRange: {
+                    ...filters.dateRange,
+                    start: e.target.value ? new Date(e.target.value) : null,
+                  },
+                })
+              }
+              className="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-2">End Date</label>
+            <input
+              type="date"
+              value={
+                filters.dateRange.end
+                  ? format(filters.dateRange.end, 'yyyy-MM-dd')
+                  : ''
+              }
+              onChange={(e) =>
+                setFilters({
+                  dateRange: {
+                    ...filters.dateRange,
+                    end: e.target.value ? new Date(e.target.value) : null,
+                  },
+                })
+              }
+              className="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+            />
+          </div>
+
+          {/* Payment Mode */}
+          <div>
+            <MultiSelect
+              label="Payment Mode"
+              options={filterOptions.paymentModes}
+              value={filters.paymentModes}
+              onChange={handlePaymentModeChange}
+              placeholder="Select payment mode..."
+            />
+          </div>
+
+          {/* Merchant ID */}
+          <div>
+            <MultiSelect
+              label="Merchant ID"
+              options={filterOptions.merchantIds}
+              value={filters.merchantIds}
+              onChange={(selected) => setFilters({ merchantIds: selected })}
+              placeholder="Select merchant ID..."
+            />
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+

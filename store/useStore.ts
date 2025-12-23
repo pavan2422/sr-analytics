@@ -1,0 +1,343 @@
+import { create } from 'zustand';
+import { Transaction, FilterState, Metrics, DailyTrend, GroupedMetrics, FailureRCA, RCAInsight, PeriodComparison } from '@/types';
+import { calculateSR, safeDivide } from '@/lib/utils';
+import { normalizeData } from '@/lib/data-normalization';
+
+interface StoreState {
+  // Raw data
+  rawTransactions: Transaction[];
+  isLoading: boolean;
+  error: string | null;
+  fileNames: string[];
+  fileSizes: number[];
+  
+  // Filters
+  filters: FilterState;
+  
+  // Computed data
+  filteredTransactions: Transaction[];
+  globalMetrics: Metrics | null;
+  dailyTrends: DailyTrend[];
+  
+  // Actions
+  setRawTransactions: (transactions: Transaction[]) => void;
+  loadDataFromFile: (file: File) => Promise<void>;
+  addDataFromFile: (file: File) => Promise<void>;
+  clearData: () => void;
+  setFilters: (filters: Partial<FilterState>) => void;
+  resetFilters: () => void;
+  applyFilters: () => void;
+  computeMetrics: () => void;
+  
+  // Computed selectors (memoized in components)
+  getFilteredTransactions: () => Transaction[];
+  getGlobalMetrics: () => Metrics | null;
+  getDailyTrends: () => DailyTrend[];
+}
+
+const defaultFilters: FilterState = {
+  dateRange: { start: null, end: null },
+  paymentModes: [],
+  merchantIds: [],
+  pgs: [],
+  banks: [],
+  cardTypes: [],
+};
+
+export const useStore = create<StoreState>((set, get) => ({
+  rawTransactions: [],
+  isLoading: false,
+  error: null,
+  fileNames: [],
+  fileSizes: [],
+  filters: defaultFilters,
+  filteredTransactions: [],
+  globalMetrics: null,
+  dailyTrends: [],
+  
+  setRawTransactions: (transactions) => {
+    set({ rawTransactions: transactions });
+    get().applyFilters();
+  },
+  
+  loadDataFromFile: async (file: File) => {
+    set({ isLoading: true, error: null });
+    
+    try {
+      console.log('Loading file:', file.name, 'Size:', file.size);
+      const fileExtension = file.name.split('.').pop()?.toLowerCase();
+      let rawData: any[] = [];
+      
+      if (fileExtension === 'csv') {
+        console.log('Parsing CSV file...');
+        const Papa = (await import('papaparse')).default;
+        const text = await file.text();
+        const result = Papa.parse(text, {
+          header: true,
+          skipEmptyLines: true,
+          transformHeader: (header) => header.trim().toLowerCase(),
+        });
+        rawData = result.data as any[];
+        console.log('CSV parsed, rows:', rawData.length);
+      } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+        console.log('Parsing Excel file...');
+        const XLSX = (await import('xlsx')).default;
+        const arrayBuffer = await file.arrayBuffer();
+        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const jsonData = XLSX.utils.sheet_to_json(worksheet);
+        // Normalize Excel headers to lowercase (like CSV)
+        rawData = jsonData.map((row: any) => {
+          const normalized: any = {};
+          Object.keys(row).forEach((key) => {
+            normalized[key.toLowerCase().trim()] = row[key];
+          });
+          return normalized;
+        });
+        console.log('Excel parsed, rows:', rawData.length);
+      } else {
+        throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
+      }
+      
+      if (rawData.length === 0) {
+        throw new Error('File appears to be empty. Please check the file format.');
+      }
+      
+      console.log('Normalizing data...');
+      const normalizedData = normalizeData(rawData);
+      console.log('Data normalized, transactions:', normalizedData.length);
+      set({ 
+        rawTransactions: normalizedData,
+        fileNames: [file.name],
+        fileSizes: [file.size],
+      });
+      get().applyFilters();
+      console.log('File loaded and processed successfully');
+    } catch (error: any) {
+      console.error('Error in loadDataFromFile:', error);
+      set({ error: error.message || 'Failed to load file. Please check the console for details.' });
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+  
+  setFilters: (newFilters) => {
+    set((state) => ({
+      filters: { ...state.filters, ...newFilters },
+    }));
+    get().applyFilters();
+  },
+  
+  resetFilters: () => {
+    set({ filters: defaultFilters });
+    get().applyFilters();
+  },
+  
+  applyFilters: () => {
+    const { rawTransactions, filters } = get();
+    
+    let filtered = [...rawTransactions];
+    
+    // Remove records where PG = 'N/A'
+    filtered = filtered.filter((tx) => {
+      const pg = String(tx.pg || '').trim().toUpperCase();
+      return pg !== 'N/A' && pg !== 'NA' && pg !== '';
+    });
+    
+    // Date range filter
+    if (filters.dateRange.start) {
+      filtered = filtered.filter(
+        (tx) => tx.txtime >= filters.dateRange.start!
+      );
+    }
+    if (filters.dateRange.end) {
+      const endDate = new Date(filters.dateRange.end);
+      endDate.setHours(23, 59, 59, 999);
+      filtered = filtered.filter((tx) => tx.txtime <= endDate);
+    }
+    
+    // Payment mode filter
+    if (filters.paymentModes.length > 0) {
+      filtered = filtered.filter((tx) =>
+        filters.paymentModes.includes(tx.paymentmode)
+      );
+    }
+    
+    // Merchant ID filter
+    if (filters.merchantIds.length > 0) {
+      filtered = filtered.filter((tx) => {
+        const merchantId = String(tx.merchantid || '').trim();
+        return filters.merchantIds.includes(merchantId);
+      });
+    }
+    
+    // PG filter
+    if (filters.pgs.length > 0) {
+      filtered = filtered.filter((tx) => filters.pgs.includes(tx.pg));
+    }
+    
+    // Bank filter (for UPI, this filters by INTENT/COLLECT classification)
+    if (filters.banks.length > 0) {
+      filtered = filtered.filter((tx) => {
+        // Import classification function
+        const { classifyUPIFlow } = require('@/lib/data-normalization');
+        const flow = classifyUPIFlow(tx.bankname);
+        // Match if selected bank is the flow type (INTENT/COLLECT) or actual bankname
+        return filters.banks.includes(flow) || filters.banks.includes(tx.bankname);
+      });
+    }
+    
+    // Card type filter
+    if (filters.cardTypes.length > 0) {
+      filtered = filtered.filter((tx) => filters.cardTypes.includes(tx.cardtype));
+    }
+    
+    set({ filteredTransactions: filtered });
+    get().computeMetrics();
+  },
+  
+  computeMetrics: () => {
+    const { filteredTransactions } = get();
+    
+    if (filteredTransactions.length === 0) {
+      set({ globalMetrics: null, dailyTrends: [] });
+      return;
+    }
+    
+    // Compute global metrics
+    const totalCount = filteredTransactions.length;
+    const successCount = filteredTransactions.filter((tx) => tx.isSuccess).length;
+    const failedCount = filteredTransactions.filter((tx) => tx.isFailed).length;
+    const userDroppedCount = filteredTransactions.filter((tx) => tx.isUserDropped).length;
+    const successGmv = filteredTransactions
+      .filter((tx) => tx.isSuccess)
+      .reduce((sum, tx) => sum + tx.txamount, 0);
+    
+    const metrics: Metrics = {
+      totalCount,
+      successCount,
+      failedCount,
+      userDroppedCount,
+      sr: calculateSR(successCount, totalCount),
+      successGmv,
+      failedPercent: calculateSR(failedCount, totalCount),
+      userDroppedPercent: calculateSR(userDroppedCount, totalCount),
+    };
+    
+    // Compute daily trends
+    const dailyMap = new Map<string, DailyTrend>();
+    
+    filteredTransactions.forEach((tx) => {
+      const date = tx.transactionDate;
+      if (!dailyMap.has(date)) {
+        dailyMap.set(date, {
+          date,
+          volume: 0,
+          sr: 0,
+          successCount: 0,
+          failedCount: 0,
+          userDroppedCount: 0,
+        });
+      }
+      
+      const trend = dailyMap.get(date)!;
+      trend.volume++;
+      if (tx.isSuccess) trend.successCount++;
+      if (tx.isFailed) trend.failedCount++;
+      if (tx.isUserDropped) trend.userDroppedCount++;
+    });
+    
+    // Calculate SR for each day
+    const dailyTrends = Array.from(dailyMap.values())
+      .map((trend) => ({
+        ...trend,
+        sr: calculateSR(trend.successCount, trend.volume),
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    
+    set({ globalMetrics: metrics, dailyTrends });
+  },
+  
+  addDataFromFile: async (file: File) => {
+    set({ isLoading: true, error: null });
+    
+    try {
+      console.log('Adding file:', file.name, 'Size:', file.size);
+      const fileExtension = file.name.split('.').pop()?.toLowerCase();
+      let rawData: any[] = [];
+      
+      if (fileExtension === 'csv') {
+        console.log('Parsing CSV file...');
+        const Papa = (await import('papaparse')).default;
+        const text = await file.text();
+        const result = Papa.parse(text, {
+          header: true,
+          skipEmptyLines: true,
+          transformHeader: (header) => header.trim().toLowerCase(),
+        });
+        rawData = result.data as any[];
+        console.log('CSV parsed, rows:', rawData.length);
+      } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+        console.log('Parsing Excel file...');
+        const XLSX = (await import('xlsx')).default;
+        const arrayBuffer = await file.arrayBuffer();
+        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const jsonData = XLSX.utils.sheet_to_json(worksheet);
+        // Normalize Excel headers to lowercase (like CSV)
+        rawData = jsonData.map((row: any) => {
+          const normalized: any = {};
+          Object.keys(row).forEach((key) => {
+            normalized[key.toLowerCase().trim()] = row[key];
+          });
+          return normalized;
+        });
+        console.log('Excel parsed, rows:', rawData.length);
+      } else {
+        throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
+      }
+      
+      if (rawData.length === 0) {
+        throw new Error('File appears to be empty. Please check the file format.');
+      }
+      
+      console.log('Normalizing data...');
+      const normalizedData = normalizeData(rawData);
+      console.log('Data normalized, transactions:', normalizedData.length);
+      
+      const { rawTransactions, fileNames, fileSizes } = get();
+      set({ 
+        rawTransactions: [...rawTransactions, ...normalizedData],
+        fileNames: [...fileNames, file.name],
+        fileSizes: [...fileSizes, file.size],
+      });
+      get().applyFilters();
+      console.log('File added and processed successfully');
+    } catch (error: any) {
+      console.error('Error in addDataFromFile:', error);
+      set({ error: error.message || 'Failed to add file. Please check the console for details.' });
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+  
+  clearData: () => {
+    set({
+      rawTransactions: [],
+      filteredTransactions: [],
+      globalMetrics: null,
+      dailyTrends: [],
+      fileNames: [],
+      fileSizes: [],
+      error: null,
+      filters: defaultFilters,
+    });
+  },
+  
+  getFilteredTransactions: () => get().filteredTransactions,
+  getGlobalMetrics: () => get().globalMetrics,
+  getDailyTrends: () => get().dailyTrends,
+}));
+
