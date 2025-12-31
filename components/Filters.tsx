@@ -5,6 +5,7 @@ import { useStore } from '@/store/useStore';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
 import { MultiSelect } from '@/components/MultiSelect';
+import { Transaction } from '@/types';
 
 interface FiltersProps {
   activeTab?: string;
@@ -14,9 +15,38 @@ interface FiltersProps {
 function FiltersComponent({ activeTab, paymentModeOptions }: FiltersProps) {
   // Use selectors to only subscribe to needed state
   const rawTransactions = useStore((state) => state.rawTransactions);
+  const _useIndexedDB = useStore((state) => state._useIndexedDB);
+  const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
+  const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
   const filters = useStore((state) => state.filters);
   const setFilters = useStore((state) => state.setFilters);
   const resetFilters = useStore((state) => state.resetFilters);
+  
+  // For IndexedDB mode, load a sample to extract filter options
+  const [sample, setSample] = useState<Transaction[]>([]);
+  
+  useEffect(() => {
+    if (!_useIndexedDB) {
+      setSample([]);
+      return;
+    }
+    if (filteredTransactionCount === 0) {
+      setSample([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const txs = await getSampleFilteredTransactions(50000);
+        if (!cancelled) setSample(txs);
+      } catch {
+        if (!cancelled) setSample([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions]);
   
   // Cleanup timeout on unmount
   const [dateTimeout, setDateTimeout] = useState<NodeJS.Timeout | null>(null);
@@ -30,7 +60,9 @@ function FiltersComponent({ activeTab, paymentModeOptions }: FiltersProps) {
 
   // Extract unique values for filters
   const filterOptions = useMemo(() => {
-    if (rawTransactions.length === 0) {
+    const source = _useIndexedDB ? sample : rawTransactions;
+    
+    if (source.length === 0) {
       return {
         paymentModes: [],
         merchantIds: [],
@@ -42,27 +74,27 @@ function FiltersComponent({ activeTab, paymentModeOptions }: FiltersProps) {
     if (paymentModeOptions && paymentModeOptions.length > 0) {
       // Filter to only show payment modes that exist in data and match tab options
       const availableModes = Array.from(
-        new Set(rawTransactions.map((tx) => tx.paymentmode).filter(Boolean))
+        new Set(source.map((tx) => tx.paymentmode).filter(Boolean))
       );
       paymentModes = paymentModeOptions.filter((mode) => availableModes.includes(mode));
     } else {
       // Overview/RCA: show all payment modes
       paymentModes = Array.from(
-        new Set(rawTransactions.map((tx) => tx.paymentmode).filter(Boolean))
+        new Set(source.map((tx) => tx.paymentmode).filter(Boolean))
       ).sort();
     }
 
     // Extract unique merchant IDs
     const merchantIds = Array.from(
       new Set(
-        rawTransactions
+        source
           .map((tx) => String(tx.merchantid || '').trim())
           .filter((id) => id !== '')
       )
     ).sort();
 
     return { paymentModes, merchantIds };
-  }, [rawTransactions, paymentModeOptions]);
+  }, [rawTransactions, _useIndexedDB, sample, paymentModeOptions]);
 
   const hasActiveFilters = useMemo(
     () =>
