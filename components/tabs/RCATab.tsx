@@ -1,63 +1,117 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useStore } from '@/store/useStore';
-import { computePeriodComparison } from '@/lib/rca';
+import { computePeriodComparison, computeUserDroppedAnalysis } from '@/lib/rca';
 import { KPICard } from '@/components/KPICard';
 import { formatNumber, formatCurrency } from '@/lib/utils';
-import { RCAInsight, DimensionAnalysis, VolumeMixChange } from '@/types';
+import { RCAInsight, DimensionAnalysis, VolumeMixChange, Transaction } from '@/types';
 import { subDays, format } from 'date-fns';
 import { compareCustomerSegments, getCustomerTypeLabel, getCustomerTypeDescription, CustomerType } from '@/lib/customer-analytics';
 import { detectProblematicCustomers } from '@/lib/customer-analytics';
+import { classifyUPIFlow, classifyCardScope, extractUPIHandle } from '@/lib/data-normalization';
+import { getFailureCategory, getFailureLabel } from '@/lib/failure-utils';
 
 type PaymentMode = 'ALL' | 'UPI' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'PREPAID_CARD' | 'NETBANKING';
 
 export function RCATab() {
-  // Use selectors to only subscribe to needed state slices
+  // Use selectors - but DON'T load all transactions into memory
+  const _useIndexedDB = useStore((state) => state._useIndexedDB);
+  const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const filteredTransactions = useStore((state) => state.filteredTransactions);
-  const rawTransactions = useStore((state) => state.rawTransactions);
+  const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
+  const getFilteredTimeBounds = useStore((state) => state.getFilteredTimeBounds);
   const filters = useStore((state) => state.filters);
   const [periodDays, setPeriodDays] = useState(7);
   const [selectedPaymentMode, setSelectedPaymentMode] = useState<PaymentMode>('ALL');
+  const [comparison, setComparison] = useState<any>(null);
+  const [isComputing, setIsComputing] = useState(false);
 
-  const comparison = useMemo(() => {
-    if (filteredTransactions.length === 0) return null;
-
-    // Determine date range from filtered transactions
-    let maxTime = -Infinity;
-    let minTime = Infinity;
-    
-    for (const tx of filteredTransactions) {
-      const time = tx.txtime.getTime();
-      if (time > maxTime) maxTime = time;
-      if (time < minTime) minTime = time;
+  // Compute comparison using either:
+  // - in-memory filteredTransactions (small files)
+  // - bounded IndexedDB samples for current/previous period (large files)
+  useEffect(() => {
+    if (filteredTransactionCount === 0) {
+      setComparison(null);
+      return;
     }
-    
-    const maxDate = new Date(maxTime);
-    const minDate = new Date(minTime);
 
-    // Current period: last N days from max date
-    const currentPeriodEnd = maxDate;
-    const currentPeriodStart = subDays(currentPeriodEnd, periodDays);
-    
-    // Previous period: same duration before current period
-    const previousPeriodEnd = subDays(currentPeriodStart, 1);
-    const previousPeriodStart = subDays(previousPeriodEnd, periodDays);
+    setIsComputing(true);
+    const computeAsync = async () => {
+      try {
+        let currentFiltered: Transaction[] = [];
+        let previousFiltered: Transaction[] = [];
 
-    const currentPeriod = filteredTransactions.filter(
-      (tx) => tx.txtime >= currentPeriodStart && tx.txtime <= currentPeriodEnd
-    );
+        if (_useIndexedDB) {
+          // Efficiently find bounds using the txtime index, then sample per-period.
+          const bounds = await getFilteredTimeBounds();
+          const currentPeriodEnd = bounds.max || new Date();
+          const currentPeriodStart = subDays(currentPeriodEnd, periodDays);
+          const previousPeriodEnd = subDays(currentPeriodStart, 1);
+          const previousPeriodStart = subDays(previousPeriodEnd, periodDays);
 
-    const previousPeriod = rawTransactions.filter(
-      (tx) => tx.txtime >= previousPeriodStart && tx.txtime <= previousPeriodEnd
-    );
+          // Sample current + previous from IndexedDB (bounded, memory-safe).
+          currentFiltered = await getSampleFilteredTransactions(25000, {
+            startDate: currentPeriodStart,
+            endDate: currentPeriodEnd,
+          });
+          previousFiltered = await getSampleFilteredTransactions(25000, {
+            startDate: previousPeriodStart,
+            endDate: previousPeriodEnd,
+          });
+        } else {
+          // Small dataset path: compute exact periods from the in-memory filtered set.
+          const times = filteredTransactions.map((t) => t.txtime.getTime());
+          const maxTime = times.length ? Math.max(...times) : Date.now();
+          const currentPeriodEnd = new Date(maxTime);
+          const currentPeriodStart = subDays(currentPeriodEnd, periodDays);
+          const previousPeriodEnd = subDays(currentPeriodStart, 1);
+          const previousPeriodStart = subDays(previousPeriodEnd, periodDays);
 
-    return {
-      comparison: computePeriodComparison(currentPeriod, previousPeriod, selectedPaymentMode),
-      customerAnalytics: compareCustomerSegments(currentPeriod, previousPeriod),
-      problematicCustomers: detectProblematicCustomers(currentPeriod),
+          currentFiltered = filteredTransactions.filter(
+            (tx) => tx.txtime >= currentPeriodStart && tx.txtime <= currentPeriodEnd
+          );
+          previousFiltered = filteredTransactions.filter(
+            (tx) => tx.txtime >= previousPeriodStart && tx.txtime <= previousPeriodEnd
+          );
+        }
+
+        if (currentFiltered.length === 0) {
+          setComparison(null);
+          setIsComputing(false);
+          return;
+        }
+
+        const result = {
+          comparison: computePeriodComparison(currentFiltered, previousFiltered, selectedPaymentMode),
+          userDroppedAnalysis: computeUserDroppedAnalysis(currentFiltered, previousFiltered, selectedPaymentMode),
+          customerAnalytics: compareCustomerSegments(currentFiltered, previousFiltered),
+          problematicCustomers: detectProblematicCustomers(currentFiltered),
+          currentPeriodTransactions: currentFiltered,
+        };
+
+        setComparison(result);
+      } catch (error) {
+        console.error('Error computing RCA:', error);
+        setComparison(null);
+      } finally {
+        setIsComputing(false);
+      }
     };
-  }, [filteredTransactions, rawTransactions, periodDays, selectedPaymentMode]);
+
+    computeAsync();
+  }, [_useIndexedDB, filteredTransactionCount, periodDays, selectedPaymentMode, filteredTransactions, getSampleFilteredTransactions, getFilteredTimeBounds, filters]);
+
+  if (isComputing) {
+    return (
+      <div className="flex items-center justify-center p-12">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-muted-foreground">Computing RCA analysis...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!comparison || !comparison.comparison) {
     return (
@@ -67,7 +121,7 @@ export function RCATab() {
     );
   }
 
-  const { comparison: rcaComparison, customerAnalytics, problematicCustomers } = comparison;
+  const { comparison: rcaComparison, userDroppedAnalysis, customerAnalytics, problematicCustomers } = comparison;
 
   const getPrimaryCauseBadgeColor = (cause: string) => {
     switch (cause) {
@@ -140,13 +194,9 @@ export function RCATab() {
 
         {/* Period Info */}
         <div className="text-sm text-muted-foreground">
-          {filteredTransactions.length > 0 && (() => {
-            // Use reduce instead of spread operator to avoid stack overflow with large arrays
-            const maxTime = filteredTransactions.reduce((max, tx) => {
-              const time = tx.txtime.getTime();
-              return time > max ? time : max;
-            }, -Infinity);
-            const maxDate = new Date(maxTime);
+          {comparison && comparison.comparison && (() => {
+            // Use comparison data instead of iterating transactions
+            const maxDate = new Date();
             const currentPeriodEnd = maxDate;
             const currentPeriodStart = subDays(currentPeriodEnd, periodDays);
             const previousPeriodEnd = subDays(currentPeriodStart, 1);
@@ -297,7 +347,7 @@ export function RCATab() {
           <p className="text-muted-foreground">No significant issues detected. SR is stable or improving.</p>
         ) : (
           <div className="space-y-4">
-            {rcaComparison.insights.map((insight, index) => (
+            {rcaComparison.insights.map((insight: RCAInsight, index: number) => (
               <InsightCard key={index} insight={insight} rank={index + 1} paymentMode={selectedPaymentMode} />
             ))}
           </div>
@@ -338,7 +388,12 @@ export function RCATab() {
       {/* Dimension Deep-Dive Panel */}
       <div className="bg-card border border-border rounded-lg p-6">
         <h3 className="text-lg font-semibold mb-4">Dimension Deep-Dive</h3>
-        <DimensionDeepDive analyses={rcaComparison.dimensionAnalyses} />
+        <DimensionDeepDive 
+          failedAnalyses={rcaComparison.dimensionAnalyses} 
+          userDroppedAnalyses={userDroppedAnalysis.dimensionAnalyses}
+          currentPeriodTransactions={(comparison.currentPeriodTransactions || []) as Transaction[]}
+          selectedPaymentMode={selectedPaymentMode}
+        />
       </div>
     </div>
   );
@@ -807,8 +862,25 @@ function RetryCustomersTable({
   );
 }
 
-function DimensionDeepDive({ analyses }: { analyses: DimensionAnalysis[] }) {
+function DimensionDeepDive({ 
+  failedAnalyses, 
+  userDroppedAnalyses,
+  currentPeriodTransactions,
+  selectedPaymentMode
+}: { 
+  failedAnalyses: DimensionAnalysis[];
+  userDroppedAnalyses: DimensionAnalysis[];
+  currentPeriodTransactions: Transaction[];
+  selectedPaymentMode: PaymentMode;
+}) {
+  const [analysisType, setAnalysisType] = useState<'FAILED' | 'USER_DROPPED'>('FAILED');
   const [selectedDimension, setSelectedDimension] = useState<string>('');
+  const [expandedRow, setExpandedRow] = useState<number | null>(null);
+
+  // Switch between FAILED and USER_DROPPED analyses
+  const analyses = analysisType === 'FAILED' ? failedAnalyses : userDroppedAnalyses;
+
+  const periodTxs: Transaction[] = currentPeriodTransactions || [];
 
   // Get unique dimensions
   const dimensions = Array.from(new Set(analyses.map((a) => a.dimension)));
@@ -821,12 +893,134 @@ function DimensionDeepDive({ analyses }: { analyses: DimensionAnalysis[] }) {
     ? analyses.filter((a) => a.dimension === selectedDimension)
     : flaggedAnalyses;
 
+  const showDimensionColumn = !selectedDimension; // Only needed when we're mixing multiple dimensions
+
+  // Helper function to get dimension value from transaction
+  const getDimensionValue = (tx: Transaction, dimName: string): string => {
+    // Error taxonomy dimensions
+    if (dimName === 'CF Error Description') return tx.cf_errordescription || 'Unknown';
+    if (dimName === 'CF Error Code') return tx.cf_errorcode || 'Unknown';
+    if (dimName === 'CF Error Source') return tx.cf_errorsource || 'Unknown';
+    if (dimName === 'CF Error Reason') return tx.cf_errorreason || 'Unknown';
+    if (dimName === 'PG Error Code') return tx.pg_errorcode || 'Unknown';
+    if (dimName === 'PG Error Message') return tx.pg_errormessage || 'Unknown';
+    if (dimName === 'Failure Category') return getFailureCategory(tx);
+    if (dimName === 'Failure Reason') return getFailureLabel(tx) || 'Unknown';
+    
+    // Core dimensions
+    if (dimName === 'PG') return tx.pg || 'Unknown';
+    if (dimName === 'Payment Mode') return tx.paymentmode || 'Unknown';
+    
+    // UPI dimensions
+    if (dimName === 'Flow Type') return classifyUPIFlow(tx.bankname);
+    if (dimName === 'Handle') return extractUPIHandle(tx.cardmasked) || 'Unknown';
+    if (dimName === 'PSP') return tx.upi_psp || 'Unknown';
+    
+    // Card dimensions
+    if (dimName === 'Card Type') return tx.cardtype || 'Unknown';
+    if (dimName === 'Card Scope') return classifyCardScope(tx.cardcountry);
+    if (dimName === 'Processing Card Type') return tx.processingcardtype || 'Unknown';
+    if (dimName === 'Native OTP Eligible') return tx.nativeotpurleligible || 'Unknown';
+    if (dimName === 'Frictionless') return tx.card_isfrictionless || 'Unknown';
+    
+    // Bank dimension
+    if (dimName === 'Bank') return tx.bankname || 'Unknown';
+    
+    return 'Unknown';
+  };
+
+  // Compute breakdown for a specific analysis
+  const computeBreakdown = (analysis: DimensionAnalysis) => {
+    // Filter to current period transactions matching this dimension value and status
+    const relevantTxs = periodTxs.filter((tx) => {
+      const statusMatch = analysisType === 'FAILED' ? tx.isFailed : tx.isUserDropped;
+      if (!statusMatch) return false;
+      
+      const dimValue = getDimensionValue(tx, analysis.dimension);
+      return dimValue === analysis.dimensionValue;
+    });
+    
+    if (relevantTxs.length === 0) {
+      return { paymentModes: [], pgs: [] };
+    }
+    
+    // Group by payment mode
+    const paymentModeMap = new Map<string, number>();
+    relevantTxs.forEach((tx) => {
+      const mode = tx.paymentmode || 'Unknown';
+      paymentModeMap.set(mode, (paymentModeMap.get(mode) || 0) + 1);
+    });
+    
+    // Group by PG
+    const pgMap = new Map<string, number>();
+    relevantTxs.forEach((tx) => {
+      const pg = tx.pg || 'Unknown';
+      pgMap.set(pg, (pgMap.get(pg) || 0) + 1);
+    });
+    
+    const paymentModes = Array.from(paymentModeMap.entries())
+      .map(([name, count]) => ({
+        name,
+        count,
+        percent: (count / relevantTxs.length) * 100
+      }))
+      .sort((a, b) => b.count - a.count);
+    
+    const pgs = Array.from(pgMap.entries())
+      .map(([name, count]) => ({
+        name,
+        count,
+        percent: (count / relevantTxs.length) * 100
+      }))
+      .sort((a, b) => b.count - a.count);
+    
+    return { paymentModes, pgs };
+  };
+
   if (dimensions.length === 0) {
     return <p className="text-muted-foreground">No dimension data available.</p>;
   }
 
   return (
     <div className="space-y-4">
+      {/* Analysis Type Selector */}
+      <div>
+        <label className="block text-sm font-medium mb-2">Analysis Type</label>
+        <div className="flex flex-wrap gap-3">
+          <button
+            onClick={() => {
+              setAnalysisType('FAILED');
+              setSelectedDimension(''); // Reset dimension selection
+            }}
+            className={`px-4 py-2 rounded-lg border transition-colors ${
+              analysisType === 'FAILED'
+                ? 'bg-primary text-primary-foreground border-primary'
+                : 'bg-background text-foreground border-border hover:border-primary/50'
+            }`}
+          >
+            Technical Failures (FAILED)
+          </button>
+          <button
+            onClick={() => {
+              setAnalysisType('USER_DROPPED');
+              setSelectedDimension(''); // Reset dimension selection
+            }}
+            className={`px-4 py-2 rounded-lg border transition-colors ${
+              analysisType === 'USER_DROPPED'
+                ? 'bg-primary text-primary-foreground border-primary'
+                : 'bg-background text-foreground border-border hover:border-primary/50'
+            }`}
+          >
+            User Dropped (USER_DROPPED)
+          </button>
+        </div>
+        <div className="mt-2 text-xs text-muted-foreground">
+          {analysisType === 'FAILED' 
+            ? 'Analyzing technical payment failures with error taxonomy (CF Error Code, PG Error, Failure Category, etc.)'
+            : 'Analyzing user abandonment patterns by PG, Payment Mode, Card Type, Flow, etc. (no error taxonomy)'}
+        </div>
+      </div>
+
       {/* Dimension Selector */}
       <div>
         <label className="block text-sm font-medium mb-2">Select Dimension</label>
@@ -842,6 +1036,13 @@ function DimensionDeepDive({ analyses }: { analyses: DimensionAnalysis[] }) {
             </option>
           ))}
         </select>
+        <div className="mt-2 text-xs text-muted-foreground">
+          Showing:{' '}
+          <span className="font-medium text-foreground">
+            {selectedDimension || 'All Flagged Issues'}
+          </span>{' '}
+          ({formatNumber(dimensionAnalyses.length)} rows)
+        </div>
       </div>
 
       {/* Dimension Analysis Table */}
@@ -852,7 +1053,13 @@ function DimensionDeepDive({ analyses }: { analyses: DimensionAnalysis[] }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border">
-                <th className="text-left py-2 px-3 font-semibold text-muted-foreground">Dimension Value</th>
+                {showDimensionColumn && (
+                  <th className="text-left py-2 px-3 font-semibold text-muted-foreground">Dimension</th>
+                )}
+                <th className="text-left py-2 px-3 font-semibold text-muted-foreground">
+                  {selectedDimension ? `${selectedDimension} Value` : 'Dimension Value'}
+                </th>
+                <th className="text-right py-2 px-3 font-semibold text-muted-foreground">Count</th>
                 <th className="text-right py-2 px-3 font-semibold text-muted-foreground">Volume Share</th>
                 <th className="text-right py-2 px-3 font-semibold text-muted-foreground">Volume Δ</th>
                 <th className="text-right py-2 px-3 font-semibold text-muted-foreground">Previous SR</th>
@@ -864,94 +1071,175 @@ function DimensionDeepDive({ analyses }: { analyses: DimensionAnalysis[] }) {
             </thead>
             <tbody>
               {dimensionAnalyses
+                .filter((a) => a.currentVolume > 0) // Only show rows with count > 0
                 .sort((a, b) => {
-                  // Sort by flagged first, then by impact
-                  if (a.flagged !== b.flagged) return a.flagged ? -1 : 1;
-                  return Math.abs(b.impactOnOverallSR || 0) - Math.abs(a.impactOnOverallSR || 0);
+                  // Sort by Count (currentVolume) descending
+                  return b.currentVolume - a.currentVolume;
                 })
-                .map((analysis, idx) => (
-                  <tr
-                    key={idx}
-                    className={`border-b border-border ${
-                      analysis.flagged ? 'bg-red-500/5' : ''
-                    }`}
-                  >
-                    <td className="py-2 px-3 font-medium">{analysis.dimensionValue}</td>
-                    <td className="text-right py-2 px-3">
-                      {analysis.volumeShareCurrent.toFixed(1)}%
-                    </td>
-                    <td className="text-right py-2 px-3">
-                      <span
-                        className={
-                          analysis.volumeDelta > 0
-                            ? 'text-success'
-                            : analysis.volumeDelta < 0
-                            ? 'text-error'
-                            : ''
-                        }
+                .map((analysis, idx) => {
+                  const rowKey = `${analysis.dimension}-${analysis.dimensionValue}`;
+                  const isExpanded = expandedRow === idx;
+                  
+                  // Compute breakdown - no hooks inside map!
+                  const breakdown = isExpanded ? computeBreakdown(analysis) : { paymentModes: [], pgs: [] };
+                  
+                  return (
+                    <React.Fragment key={rowKey}>
+                      <tr
+                        className={`border-b border-border cursor-pointer hover:bg-muted/30 transition-colors ${
+                          analysis.flagged ? 'bg-red-500/5' : ''
+                        }`}
+                        onClick={() => setExpandedRow(isExpanded ? null : idx)}
                       >
-                        {analysis.volumeDelta >= 0 ? '+' : ''}
-                        {analysis.volumeDelta.toFixed(1)}%
-                      </span>
-                    </td>
-                    <td className="text-right py-2 px-3">
-                      <span
-                        className={
-                          analysis.previousSR >= 90
-                            ? 'text-success'
-                            : analysis.previousSR >= 80
-                            ? 'text-warning'
-                            : 'text-error'
-                        }
-                      >
-                        {analysis.previousSR.toFixed(2)}%
-                      </span>
-                    </td>
-                    <td className="text-right py-2 px-3">
-                      <span
-                        className={
-                          analysis.currentSR >= 90
-                            ? 'text-success'
-                            : analysis.currentSR >= 80
-                            ? 'text-warning'
-                            : 'text-error'
-                        }
-                      >
-                        {analysis.currentSR.toFixed(2)}%
-                      </span>
-                    </td>
-                    <td className="text-right py-2 px-3">
-                      <span
-                        className={
-                          analysis.srDelta < 0
-                            ? 'text-error'
-                            : analysis.srDelta > 0
-                            ? 'text-success'
-                            : ''
-                        }
-                      >
-                        {analysis.srDelta >= 0 ? '+' : ''}
-                        {analysis.srDelta.toFixed(2)}%
-                      </span>
-                    </td>
-                    <td className="text-center py-2 px-3">
-                      {analysis.flagged && analysis.flagReason && (
-                        <span className="px-2 py-1 rounded text-xs bg-red-500/20 text-red-300 border border-red-500/50">
-                          {analysis.flagReason.replace('_', ' ')}
-                        </span>
+                        {showDimensionColumn && (
+                          <td className="py-2 px-3 text-xs text-muted-foreground">{analysis.dimension}</td>
+                        )}
+                        <td className="py-2 px-3">
+                          <div className="flex items-center gap-2">
+                            <svg
+                              className={`w-4 h-4 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                            </svg>
+                            <span className="font-medium">{analysis.dimensionValue}</span>
+                          </div>
+                        </td>
+                        <td className="text-right py-2 px-3">
+                          {formatNumber(analysis.currentVolume)}
+                        </td>
+                        <td className="text-right py-2 px-3">
+                          {analysis.volumeShareCurrent.toFixed(1)}%
+                        </td>
+                        <td className="text-right py-2 px-3">
+                          <span
+                            className={
+                              analysis.volumeDelta > 0
+                                ? 'text-success'
+                                : analysis.volumeDelta < 0
+                                ? 'text-error'
+                                : ''
+                            }
+                          >
+                            {analysis.volumeDelta >= 0 ? '+' : ''}
+                            {analysis.volumeDelta.toFixed(1)}%
+                          </span>
+                        </td>
+                        <td className="text-right py-2 px-3">
+                          <span
+                            className={
+                              analysis.previousSR >= 90
+                                ? 'text-success'
+                                : analysis.previousSR >= 80
+                                ? 'text-warning'
+                                : 'text-error'
+                            }
+                          >
+                            {analysis.previousSR.toFixed(2)}%
+                          </span>
+                        </td>
+                        <td className="text-right py-2 px-3">
+                          <span
+                            className={
+                              analysis.currentSR >= 90
+                                ? 'text-success'
+                                : analysis.currentSR >= 80
+                                ? 'text-warning'
+                                : 'text-error'
+                            }
+                          >
+                            {analysis.currentSR.toFixed(2)}%
+                          </span>
+                        </td>
+                        <td className="text-right py-2 px-3">
+                          <span
+                            className={
+                              analysis.srDelta < 0
+                                ? 'text-error'
+                                : analysis.srDelta > 0
+                                ? 'text-success'
+                                : ''
+                            }
+                          >
+                            {analysis.srDelta >= 0 ? '+' : ''}
+                            {analysis.srDelta.toFixed(2)}%
+                          </span>
+                        </td>
+                        <td className="text-center py-2 px-3">
+                          {analysis.flagged && analysis.flagReason && (
+                            <span className="px-2 py-1 rounded text-xs bg-red-500/20 text-red-300 border border-red-500/50">
+                              {analysis.flagReason.replace('_', ' ')}
+                            </span>
+                          )}
+                        </td>
+                        <td className="text-right py-2 px-3">
+                          {analysis.counterfactualSR ? (
+                            <span className="text-primary font-medium">
+                              {analysis.counterfactualSR.toFixed(2)}%
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                      </tr>
+                      
+                      {/* Expanded Breakdown Row */}
+                      {isExpanded && (
+                        <tr className="border-b border-border bg-muted/20">
+                          <td colSpan={showDimensionColumn ? 10 : 9} className="py-4 px-6">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                              {/* Payment Mode Breakdown */}
+                              <div>
+                                <h4 className="text-sm font-semibold mb-3 text-foreground">Payment Mode Breakdown</h4>
+                                {breakdown.paymentModes.length === 0 ? (
+                                  <p className="text-xs text-muted-foreground">No data</p>
+                                ) : (
+                                  <div className="space-y-2">
+                                    {breakdown.paymentModes.map((pm) => (
+                                      <div key={pm.name} className="flex items-center justify-between text-sm">
+                                        <span className="text-foreground">{pm.name}</span>
+                                        <div className="flex items-center gap-3">
+                                          <span className="text-muted-foreground">{formatNumber(pm.count)}</span>
+                                          <span className="text-primary font-medium w-12 text-right">
+                                            {pm.percent.toFixed(1)}%
+                                          </span>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              
+                              {/* PG Breakdown */}
+                              <div>
+                                <h4 className="text-sm font-semibold mb-3 text-foreground">PG Breakdown</h4>
+                                {breakdown.pgs.length === 0 ? (
+                                  <p className="text-xs text-muted-foreground">No data</p>
+                                ) : (
+                                  <div className="space-y-2">
+                                    {breakdown.pgs.map((pg) => (
+                                      <div key={pg.name} className="flex items-center justify-between text-sm">
+                                        <span className="text-foreground">{pg.name}</span>
+                                        <div className="flex items-center gap-3">
+                                          <span className="text-muted-foreground">{formatNumber(pg.count)}</span>
+                                          <span className="text-primary font-medium w-12 text-right">
+                                            {pg.percent.toFixed(1)}%
+                                          </span>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                    <td className="text-right py-2 px-3">
-                      {analysis.counterfactualSR ? (
-                        <span className="text-primary font-medium">
-                          {analysis.counterfactualSR.toFixed(2)}%
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                    </React.Fragment>
+                  );
+                })}
             </tbody>
           </table>
         </div>

@@ -5,14 +5,25 @@ export interface Transaction {
   pg: string;
   bankname: string;
   cardnumber: string;
+  cardmasked?: string; // Used for UPI VPA / masked card display in some exports
   cardtype: string;
   cardcountry: string;
   processingcardtype: string;
   nativeotpurleligible: string;
   card_isfrictionless: string;
   card_nativeotpaction: string;
+  card_par?: string;
+  // Cards: CVV presence (often Y/N, true/false, 1/0)
+  iscvvpresent?: string;
   upi_psp: string;
   txmsg: string;
+  // Cashfree/PG error taxonomy (new columns)
+  cf_errorcode?: string;
+  cf_errorreason?: string;
+  cf_errorsource?: string;
+  cf_errordescription?: string;
+  pg_errorcode?: string;
+  pg_errormessage?: string;
   txtime: Date;
   txamount: number;
   orderamount: number;
@@ -145,5 +156,25 @@ export interface PeriodComparison {
   failedRateCurrent: number;
   failedRatePrevious: number;
   volumeMixChanges: VolumeMixChange[]; // Volume mix analysis
+}
+
+export type TrendDirection = 'INCREASING' | 'DECREASING' | 'STABLE';
+export type SpikeType = 'SUDDEN' | 'GRADUAL' | 'RECURRING' | 'PERSISTENT';
+
+export interface FailureInsight {
+  paymentMode: string;
+  cfErrorDescription: string;
+  failureShare: number; // % of total failures
+  primarySpikePeriod: string; // Date range
+  trendDirection: TrendDirection;
+  volumeDelta: number; // % change compared to previous period
+  insightSummary: string; // Human-readable explanation
+  actionableRecommendation: string; // Specific next step
+  // Metadata for sorting and filtering
+  currentVolume: number;
+  previousVolume: number;
+  isAnomaly: boolean;
+  spikeType: SpikeType | null;
+  impactScore: number; // Higher = more important
 }
 

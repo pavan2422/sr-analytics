@@ -121,6 +121,7 @@ export function DataTable<T = GroupedMetrics>({ data, columns, height = 400 }: D
               <div
                 key={row.id}
                 ref={shouldVirtualize ? virtualizer.measureElement : undefined}
+                data-index={virtualRow.index}
                 className="grid items-center border-b border-border hover:bg-muted/50 transition-colors"
                 style={{
                   gridTemplateColumns,

@@ -19,6 +19,13 @@ export function FileUpload() {
         return;
       }
       
+      // Block XLSX for large files (>100MB) - must use CSV
+      const fileSizeMB = file.size / 1024 / 1024;
+      if ((extension === 'xlsx' || extension === 'xls') && fileSizeMB > 100) {
+        alert('Large files (>100MB) must be uploaded as CSV format.\n\nXLSX files are loaded fully into memory and will cause crashes.\n\nPlease export your data as CSV and try again.');
+        return;
+      }
+      
       try {
         await loadDataFromFile(file);
         console.log('File loaded successfully');

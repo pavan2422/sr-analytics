@@ -1,6 +1,7 @@
 import { Transaction, GroupedMetrics, DailyTrend, FailureRCA } from '@/types';
 import { calculateSR, safeDivide } from '@/lib/utils';
 import { extractUPIHandle, classifyUPIFlow, classifyCardScope, classifyBankTier } from '@/lib/data-normalization';
+import { getFailureLabel } from '@/lib/failure-utils';
 
 export function groupBy(
   transactions: Transaction[],
@@ -87,16 +88,14 @@ export function computeUPIMetrics(transactions: Transaction[]) {
   // PSP Level
   const pspLevel = groupBy(upiTxs, (tx) => tx.upi_psp || 'Unknown');
   
-  // Failure RCA
-  const failures = upiTxs.filter(
-    (tx) => !tx.isSuccess && tx.txstatus !== 'INIT_FAILED'
-  );
+  // Failure RCA - only analyze technical failures (excludes USER_DROPPED, INIT_FAILED)
+  const failures = upiTxs.filter((tx) => tx.isFailed);
   const totalCount = upiTxs.length;
   const successCount = upiTxs.filter((tx) => tx.isSuccess).length;
   
   const failureGroups = new Map<string, Transaction[]>();
   failures.forEach((tx) => {
-    const msg = tx.txmsg || 'Unknown';
+    const msg = getFailureLabel(tx) || 'Unknown';
     if (!failureGroups.has(msg)) {
       failureGroups.set(msg, []);
     }
@@ -151,16 +150,18 @@ export function computeCardMetrics(transactions: Transaction[]) {
     nativeOtpEligible: groupBy(cardTxs, (tx) => tx.nativeotpurleligible || 'Unknown'),
     isFrictionless: groupBy(cardTxs, (tx) => tx.card_isfrictionless || 'Unknown'),
     nativeOtpAction: groupBy(cardTxs, (tx) => tx.card_nativeotpaction || 'Unknown'),
+    cardPar: groupBy(cardTxs, (tx) => tx.card_par || 'Unknown'),
+    cvvPresent: groupBy(cardTxs, (tx) => String(tx.iscvvpresent || 'Unknown').trim() || 'Unknown'),
   };
   
-  // Failure RCA
-  const failures = cardTxs.filter((tx) => !tx.isSuccess);
+  // Failure RCA - only analyze technical failures (excludes USER_DROPPED, INIT_FAILED)
+  const failures = cardTxs.filter((tx) => tx.isFailed);
   const totalCount = cardTxs.length;
   const successCount = cardTxs.filter((tx) => tx.isSuccess).length;
   
   const failureGroups = new Map<string, Transaction[]>();
   failures.forEach((tx) => {
-    const msg = tx.txmsg || 'Unknown';
+    const msg = getFailureLabel(tx) || 'Unknown';
     if (!failureGroups.has(msg)) {
       failureGroups.set(msg, []);
     }
@@ -207,14 +208,14 @@ export function computeNetbankingMetrics(transactions: Transaction[]) {
   // Bank Tier Level
   const bankTierLevel = groupBy(nbTxs, (tx) => classifyBankTier(tx.bankname));
   
-  // Failure RCA
-  const failures = nbTxs.filter((tx) => !tx.isSuccess);
+  // Failure RCA - only analyze technical failures (excludes USER_DROPPED, INIT_FAILED)
+  const failures = nbTxs.filter((tx) => tx.isFailed);
   const totalCount = nbTxs.length;
   const successCount = nbTxs.filter((tx) => tx.isSuccess).length;
   
   const failureGroups = new Map<string, Transaction[]>();
   failures.forEach((tx) => {
-    const msg = tx.txmsg || 'Unknown';
+    const msg = getFailureLabel(tx) || 'Unknown';
     if (!failureGroups.has(msg)) {
       failureGroups.set(msg, []);
     }

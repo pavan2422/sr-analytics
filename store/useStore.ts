@@ -6,15 +6,20 @@ import { normalizeData, classifyUPIFlow } from '@/lib/data-normalization';
 import { indexedDBStorage } from './indexedDBStorage';
 import { streamCSVFile, processExcelFile, ProcessingProgress } from '@/lib/file-processor';
 import { WorkerManager } from '@/lib/worker-manager';
+import { dbManager } from '@/lib/indexeddb-manager';
 
 interface StoreState {
-  // Raw data
-  rawTransactions: Transaction[];
+  // Raw data metadata (not full transactions for large files)
+  rawTransactions: Transaction[]; // Only kept for small datasets (<100k rows)
+  transactionCount: number; // Total count of transactions in IndexedDB
   isLoading: boolean;
   error: string | null;
   fileNames: string[];
   fileSizes: number[];
+  isSampledDataset: boolean; // True when we sampled a huge file instead of ingesting everything
+  sampledFromBytes: number; // Original file size when sampling
   _skipPersistence: boolean; // Internal flag to skip persistence during large loads
+  _useIndexedDB: boolean; // Flag to use IndexedDB instead of memory
   progress: ProcessingProgress | null; // Progress tracking for large files
   hasHydrated: boolean; // True after Zustand persist rehydration completes
   analysisStage: 'FILTERING' | 'COMPUTING' | null; // UI hint for post-upload analysis work
@@ -22,8 +27,9 @@ interface StoreState {
   // Filters
   filters: FilterState;
   
-  // Computed data
-  filteredTransactions: Transaction[];
+  // Computed data (cached results)
+  filteredTransactions: Transaction[]; // Only populated for small filtered sets
+  filteredTransactionCount: number; // Count of filtered transactions
   globalMetrics: Metrics | null;
   dailyTrends: DailyTrend[];
   
@@ -31,11 +37,25 @@ interface StoreState {
   setRawTransactions: (transactions: Transaction[]) => void;
   loadDataFromFile: (file: File) => Promise<void>;
   addDataFromFile: (file: File) => Promise<void>;
-  clearData: () => void;
+  clearData: () => Promise<void>;
+  restoreFromIndexedDB: () => Promise<{ status: 'restored' | 'missing' | 'error'; count?: number; error?: string }>;
   setFilters: (filters: Partial<FilterState>) => void;
   resetFilters: () => void;
   applyFilters: () => Promise<void>;
   computeMetrics: () => Promise<void>;
+  
+  // IndexedDB operations
+  streamFilteredTransactions: (onChunk: (chunk: Transaction[]) => Promise<void>, chunkSize?: number) => Promise<void>;
+  getSampleFilteredTransactions: (maxRows?: number, overrides?: Partial<{
+    startDate?: Date;
+    endDate?: Date;
+    paymentModes?: string[];
+    merchantIds?: string[];
+    pgs?: string[];
+    banks?: string[];
+    cardTypes?: string[];
+  }>) => Promise<Transaction[]>;
+  getFilteredTimeBounds: () => Promise<{ min?: Date; max?: Date }>;
   
   // Computed selectors (memoized in components)
   getFilteredTransactions: () => Transaction[];
@@ -54,6 +74,291 @@ const defaultFilters: FilterState = {
 
 // Worker manager instances (shared across store)
 const workerManager = new WorkerManager();
+
+// Stream a HUGE CSV but stop after a fixed number of rows (sample mode).
+async function streamCSVSampleToMemory(
+  file: File,
+  maxRows: number,
+  progressCallback: (progress: ProcessingProgress) => void
+): Promise<Transaction[]> {
+  const Papa = (await import('papaparse')).default;
+  const { normalizeData } = await import('@/lib/data-normalization');
+
+  return new Promise<Transaction[]>((resolve, reject) => {
+    let processedRows = 0;
+    const collected: Transaction[] = [];
+    const fileSize = file.size;
+    let lastProgressUpdate = Date.now();
+
+    progressCallback({
+      processed: 0,
+      total: maxRows,
+      percentage: 0,
+      stage: 'reading',
+    });
+
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      // IMPORTANT: PapaParse `worker: true` does NOT support parser.pause()/resume()
+      // (it throws "Not implemented"). We keep parsing on the main thread but
+      // normalize in our own worker and use pause/resume for backpressure.
+      worker: false,
+      chunkSize: 2 * 1024 * 1024, // 2MB read chunks (bytes)
+      chunk: async (chunkResults, parser) => {
+        try {
+          parser?.pause?.();
+        } catch {
+          // ignore (some PapaParse parser implementations don't support pause/resume)
+        }
+        try {
+          const chunkData = chunkResults.data as any[];
+          if (chunkData.length > 0) {
+            const normalized = normalizeData(chunkData);
+            const remaining = maxRows - collected.length;
+            if (remaining > 0) {
+              collected.push(...normalized.slice(0, remaining));
+            }
+            processedRows += chunkData.length;
+          }
+
+          const now = Date.now();
+          if (now - lastProgressUpdate > 200) {
+            const pct = Math.min((collected.length / maxRows) * 100, 99);
+            progressCallback({
+              processed: collected.length,
+              total: maxRows,
+              percentage: pct,
+              stage: 'normalizing',
+            });
+            lastProgressUpdate = now;
+          }
+
+          if (collected.length >= maxRows) {
+            parser.abort();
+            progressCallback({
+              processed: collected.length,
+              total: maxRows,
+              percentage: 100,
+              stage: 'complete',
+            });
+            resolve(collected);
+            return;
+          }
+
+          // Resume quickly
+          setTimeout(() => {
+            try {
+              parser?.resume?.();
+            } catch {
+              // ignore
+            }
+          }, 0);
+        } catch (e) {
+          try {
+            parser?.abort?.();
+          } catch {
+            // ignore
+          }
+          reject(e);
+        }
+      },
+      complete: () => {
+        progressCallback({
+          processed: collected.length,
+          total: maxRows,
+          percentage: 100,
+          stage: 'complete',
+        });
+        resolve(collected);
+      },
+      error: (error) => {
+        reject(error);
+      },
+    });
+  });
+}
+
+// Helper function to stream CSV directly to IndexedDB
+async function streamCSVToIndexedDB(file: File, progressCallback: (progress: ProcessingProgress) => void): Promise<void> {
+  const Papa = (await import('papaparse')).default;
+  // IMPORTANT: For multi-GB files, normalizing on the main thread will freeze/crash the tab.
+  // We normalize batches in our own Web Worker (`public/file-processor-worker.js`).
+  
+  return new Promise<void>((resolve, reject) => {
+    let processedRows = 0;
+    let normalizedChunk: Transaction[] = [];
+    // Larger write batches drastically reduce IndexedDB transaction overhead for big files.
+    const chunkSize = 50000;
+    const fileSize = file.size;
+    let lastProgressUpdate = Date.now();
+    
+    progressCallback({
+      processed: 0,
+      total: fileSize,
+      percentage: 0,
+      stage: 'reading',
+    });
+
+    // Dedicated normalizer worker for this upload.
+    let normalizerWorker: Worker | null = null;
+    const getNormalizerWorker = () => {
+      if (normalizerWorker) return normalizerWorker;
+      normalizerWorker = new Worker('/file-processor-worker.js');
+      return normalizerWorker;
+    };
+
+    const normalizeInWorker = (batch: any[]): Promise<Transaction[]> => {
+      return new Promise((res, rej) => {
+        const w = getNormalizerWorker();
+        const onMessage = (e: MessageEvent) => {
+          if (e.data?.type === 'BATCH_NORMALIZED') {
+            w.removeEventListener('message', onMessage);
+            w.removeEventListener('error', onError);
+            res(e.data.payload.normalized as Transaction[]);
+          } else if (e.data?.type === 'BATCH_ERROR') {
+            w.removeEventListener('message', onMessage);
+            w.removeEventListener('error', onError);
+            rej(new Error(String(e.data.payload?.error || 'Worker normalization failed')));
+          }
+        };
+        const onError = (err: ErrorEvent) => {
+          w.removeEventListener('message', onMessage);
+          w.removeEventListener('error', onError);
+          rej(err);
+        };
+        w.addEventListener('message', onMessage);
+        w.addEventListener('error', onError);
+        w.postMessage({ type: 'NORMALIZE_BATCH', payload: { batch } });
+      });
+    };
+    
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      // IMPORTANT: PapaParse `worker: true` does NOT support parser.pause()/resume()
+      // (it throws "Not implemented"). We keep parsing on the main thread but
+      // normalize in our own worker and use pause/resume for backpressure.
+      worker: false,
+      chunkSize: 4 * 1024 * 1024, // 4MB read chunks (bytes)
+      chunk: async (chunkResults, parser) => {
+        // Important: pause/resume to avoid overlapping async writes and memory blowups.
+        try {
+          parser?.pause?.();
+        } catch {
+          // ignore
+        }
+        const chunkData = chunkResults.data as any[];
+        processedRows += chunkData.length;
+        
+        // Normalize chunk in our worker (critical for stability on 1GB+ files)
+        let normalized: Transaction[] = [];
+        try {
+          normalized = await normalizeInWorker(chunkData);
+        } catch (error) {
+          parser.abort();
+          reject(error);
+          return;
+        }
+        normalizedChunk.push(...normalized);
+        
+        // When chunk is large enough, write to IndexedDB
+        if (normalizedChunk.length >= chunkSize) {
+          const toStore = normalizedChunk.splice(0, chunkSize);
+          try {
+            await dbManager.addTransactions(toStore);
+          } catch (error) {
+            parser.abort();
+            reject(error);
+            return;
+          }
+          
+          // Progress update
+          const now = Date.now();
+          if (now - lastProgressUpdate > 200) {
+            const estimatedPercentage = Math.min((processedRows / 10000000) * 90, 90);
+            progressCallback({
+              processed: processedRows,
+              total: fileSize,
+              percentage: estimatedPercentage,
+              stage: 'normalizing',
+            });
+            lastProgressUpdate = now;
+          }
+        }
+        
+        // Yield to browser and resume parsing
+        setTimeout(() => {
+          try {
+            parser?.resume?.();
+          } catch {
+            // ignore
+          }
+        }, 0);
+      },
+      complete: async () => {
+        // Store remaining chunk
+        if (normalizedChunk.length > 0) {
+          try {
+            await dbManager.addTransactions(normalizedChunk);
+          } catch (error) {
+            reject(error);
+            return;
+          }
+        }
+        
+        progressCallback({
+          processed: processedRows,
+          total: processedRows,
+          percentage: 95,
+          stage: 'normalizing',
+        });
+        if (normalizerWorker) {
+          normalizerWorker.terminate();
+          normalizerWorker = null;
+        }
+        resolve();
+      },
+      error: (error) => {
+        progressCallback({
+          processed: processedRows,
+          total: fileSize,
+          percentage: 0,
+          stage: 'parsing',
+          error: error.message,
+        });
+        if (normalizerWorker) {
+          normalizerWorker.terminate();
+          normalizerWorker = null;
+        }
+        reject(error);
+      },
+    });
+  });
+}
+
+// Helper function to process and store data in chunks
+async function processAndStoreChunks(rawData: any[], progressCallback: (progress: ProcessingProgress) => void): Promise<void> {
+  const chunkSize = 10000;
+  const { normalizeData } = await import('@/lib/data-normalization');
+  
+  for (let i = 0; i < rawData.length; i += chunkSize) {
+    const chunk = rawData.slice(i, i + chunkSize);
+    const normalized = normalizeData(chunk);
+    
+    await dbManager.addTransactions(normalized);
+    
+    progressCallback({
+      processed: Math.min(i + chunkSize, rawData.length),
+      total: rawData.length,
+      percentage: 60 + Math.round(((i + chunkSize) / rawData.length) * 35),
+      stage: 'normalizing',
+    });
+    
+    // Yield to browser
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+}
 
 // Debounce and defer heavy computations
 let filterTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -88,18 +393,83 @@ export const useStore = create<StoreState>()(
   persist(
     (set, get) => ({
   rawTransactions: [],
+  transactionCount: 0,
   isLoading: false,
   error: null,
   fileNames: [],
   fileSizes: [],
+  isSampledDataset: false,
+  sampledFromBytes: 0,
   _skipPersistence: false,
+  _useIndexedDB: false,
   progress: null,
   hasHydrated: false,
   analysisStage: null,
   filters: defaultFilters,
   filteredTransactions: [],
+  filteredTransactionCount: 0,
   globalMetrics: null,
   dailyTrends: [],
+  
+  streamFilteredTransactions: async (onChunk, chunkSize = 50000) => {
+    const { filters, _useIndexedDB } = get();
+    
+    if (!_useIndexedDB) {
+      // For small datasets, use in-memory transactions
+      const { filteredTransactions } = get();
+      for (let i = 0; i < filteredTransactions.length; i += chunkSize) {
+        await onChunk(filteredTransactions.slice(i, i + chunkSize));
+        if (i + chunkSize < filteredTransactions.length) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+      return;
+    }
+    
+    // For large datasets, stream from IndexedDB
+    await dbManager.init();
+    await dbManager.streamTransactions(
+      onChunk,
+      chunkSize,
+      {
+        startDate: filters.dateRange.start || undefined,
+        endDate: filters.dateRange.end || undefined,
+        paymentModes: filters.paymentModes.length > 0 ? filters.paymentModes : undefined,
+        merchantIds: filters.merchantIds.length > 0 ? filters.merchantIds : undefined,
+        pgs: filters.pgs.length > 0 ? filters.pgs : undefined,
+        banks: filters.banks.length > 0 ? filters.banks : undefined,
+        cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
+      }
+    );
+  },
+
+  getSampleFilteredTransactions: async (maxRows = 50000, overrides) => {
+    const { filters } = get();
+    await dbManager.init();
+    return dbManager.sampleTransactions(maxRows, {
+      startDate: overrides?.startDate ?? filters.dateRange.start ?? undefined,
+      endDate: overrides?.endDate ?? filters.dateRange.end ?? undefined,
+      paymentModes: overrides?.paymentModes ?? (filters.paymentModes.length > 0 ? filters.paymentModes : undefined),
+      merchantIds: overrides?.merchantIds ?? (filters.merchantIds.length > 0 ? filters.merchantIds : undefined),
+      pgs: overrides?.pgs ?? (filters.pgs.length > 0 ? filters.pgs : undefined),
+      banks: overrides?.banks ?? (filters.banks.length > 0 ? filters.banks : undefined),
+      cardTypes: overrides?.cardTypes ?? (filters.cardTypes.length > 0 ? filters.cardTypes : undefined),
+    });
+  },
+
+  getFilteredTimeBounds: async () => {
+    const { filters } = get();
+    await dbManager.init();
+    return dbManager.getFilteredTimeBounds({
+      startDate: filters.dateRange.start || undefined,
+      endDate: filters.dateRange.end || undefined,
+      paymentModes: filters.paymentModes.length > 0 ? filters.paymentModes : undefined,
+      merchantIds: filters.merchantIds.length > 0 ? filters.merchantIds : undefined,
+      pgs: filters.pgs.length > 0 ? filters.pgs : undefined,
+      banks: filters.banks.length > 0 ? filters.banks : undefined,
+      cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
+    });
+  },
   
   setRawTransactions: (transactions) => {
     set({ rawTransactions: transactions });
@@ -110,36 +480,81 @@ export const useStore = create<StoreState>()(
     set({ isLoading: true, error: null, progress: null, analysisStage: null });
     
     try {
+      await dbManager.init();
+      await dbManager.clear(); // Clear previous data
+      
       const fileSizeMB = file.size / 1024 / 1024;
       console.log('Loading file:', file.name, 'Size:', fileSizeMB.toFixed(2), 'MB');
+
+      // Ultra-large files (e.g., 3GB) will exceed browser memory/quota if fully ingested.
+      // Use a bounded sample mode instead to avoid crashes.
+      const ultraLargeThresholdBytes = 1500 * 1024 * 1024; // 1.5GB
+      const isUltraLarge = file.size >= ultraLargeThresholdBytes;
       
-      // Warn for very large files
-      if (fileSizeMB > 500) {
-        console.warn('Very large file detected. Processing may take several minutes.');
-      }
-      
-      // Check browser memory limits (rough estimate)
-      if (fileSizeMB > 2000) {
-        throw new Error('File is too large (>2GB). Please split your data into smaller files (recommended: <500MB per file).');
-      }
+      // For files > 100MB, use IndexedDB streaming mode
+      const useIndexedDBMode = !isUltraLarge && (file.size > 100 * 1024 * 1024 || fileSizeMB > 100);
       
       const fileExtension = file.name.split('.').pop()?.toLowerCase();
-      let rawData: any[] = [];
+      let totalRows = 0;
       
-      // Use streaming for large files (>100MB)
-      const isLargeFile = file.size > 100 * 1024 * 1024;
       const progressCallback = (progress: ProcessingProgress) => {
         set({ progress });
       };
+
+      if (isUltraLarge) {
+        // Sample first N rows into memory, compute metrics from sample.
+        const maxSampleRows = 100000; // 100k rows keeps memory + persistence manageable
+        console.log('Ultra-large file detected. Using sample mode:', maxSampleRows, 'rows');
+        set({ _useIndexedDB: false, _skipPersistence: true, isSampledDataset: true, sampledFromBytes: file.size });
+
+        if (fileExtension !== 'csv') {
+          throw new Error('Very large files must be uploaded as CSV. Please export as CSV and try again.');
+        }
+
+        const sampled = await streamCSVSampleToMemory(file, maxSampleRows, progressCallback);
+        if (sampled.length === 0) {
+          throw new Error('Could not read any rows from the file. Please check the export and try again.');
+        }
+
+        set({
+          rawTransactions: sampled,
+          transactionCount: sampled.length,
+          fileNames: [file.name],
+          fileSizes: [file.size],
+          progress: { processed: sampled.length, total: sampled.length, percentage: 100, stage: 'complete' },
+          _skipPersistence: false,
+        });
+
+        // Apply filters and metrics based on sample
+        await get().applyFilters();
+        return;
+      }
       
-      if (fileExtension === 'csv') {
-        console.log('Parsing CSV file...', isLargeFile ? '(streaming mode)' : '(standard mode)');
+      // Process and stream directly to IndexedDB for large files
+      if (useIndexedDBMode) {
+        console.log('Using IndexedDB streaming mode for large file');
+        set({ _useIndexedDB: true, _skipPersistence: true, isSampledDataset: false, sampledFromBytes: 0 });
         
-        if (isLargeFile) {
-          // Use streaming parser for large files
-          rawData = await streamCSVFile(file, progressCallback);
+        if (fileExtension === 'csv') {
+          // Stream CSV and write directly to IndexedDB
+          await streamCSVToIndexedDB(file, progressCallback);
+        } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+          // For Excel, we still need to load it, but process in chunks
+          const rawData = await processExcelFile(file, progressCallback);
+          totalRows = rawData.length;
+          
+          // Process and write in chunks
+          set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
+          await processAndStoreChunks(rawData, progressCallback);
         } else {
-          // Standard parsing for smaller files
+          throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
+        }
+      } else {
+        // Small file mode - load into memory
+        set({ _useIndexedDB: false, isSampledDataset: false, sampledFromBytes: 0 });
+        let rawData: any[] = [];
+        
+        if (fileExtension === 'csv') {
           const Papa = (await import('papaparse')).default;
           const text = await file.text();
           const result = Papa.parse(text, {
@@ -149,80 +564,59 @@ export const useStore = create<StoreState>()(
           });
           rawData = result.data as any[];
           set({ progress: { processed: rawData.length, total: rawData.length, percentage: 50, stage: 'parsing' } });
+        } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+          rawData = await processExcelFile(file, progressCallback);
+        } else {
+          throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
         }
-        console.log('CSV parsed, rows:', rawData.length);
-      } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
-        console.log('Parsing Excel file...');
-        rawData = await processExcelFile(file, progressCallback);
-        console.log('Excel parsed, rows:', rawData.length);
-      } else {
-        throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
-      }
-      
-      if (rawData.length === 0) {
-        throw new Error('File appears to be empty. Please check the file format.');
-      }
-      
-      console.log('Normalizing data...');
-      set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
-      
-      // Process data in chunks using worker manager (which uses main thread with chunking)
-      // This approach is memory-efficient and prevents UI blocking
-      const isLargeDataset = rawData.length > 50000;
-      let allNormalized: Transaction[] = [];
-      
-      try {
-        // Use worker manager which handles chunking efficiently
-        allNormalized = await workerManager.processData(
+        
+        if (rawData.length === 0) {
+          throw new Error('File appears to be empty. Please check the file format.');
+        }
+        
+        totalRows = rawData.length;
+        console.log('Normalizing data...');
+        set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
+        
+        const allNormalized = await workerManager.processData(
           rawData,
           (progress) => {
-            // Adjust percentage to fit in 60-90% range
             progressCallback({
               ...progress,
               percentage: 60 + Math.round((progress.percentage / 100) * 30),
             });
           },
-          isLargeDataset ? 10000 : 20000 // Smaller chunks for very large datasets
+          20000
         );
-      } catch (error: any) {
-        console.error('Error processing data:', error);
-        // If processing fails due to memory, provide helpful error
-        if (error.message?.includes('memory') || error.message?.includes('quota')) {
-          throw new Error('File is too large to process. Please try a smaller file or split your data into multiple files.');
-        }
-        throw error;
+        
+        set({ 
+          rawTransactions: allNormalized,
+          transactionCount: allNormalized.length,
+        });
       }
       
-      console.log('Data normalized, transactions:', allNormalized.length);
-      
-      // For large datasets, set a flag to skip immediate persistence
-      const shouldSkipPersistence = allNormalized.length > 50000;
-      
-      if (shouldSkipPersistence) {
-        set({ _skipPersistence: true });
+      // Get final count from IndexedDB if using IndexedDB mode
+      const finalCount = useIndexedDBMode ? await dbManager.getCount() : totalRows;
+
+      if (finalCount === 0) {
+        throw new Error(
+          'No rows were written to browser storage (IndexedDB). Please re-export the file and re-upload. ' +
+          'If your CSV contains an "id" column, this app uses its own internal primary key and should handle it, ' +
+          'but an empty count usually indicates a parsing or storage failure.'
+        );
       }
       
-      // Set data - for large datasets, persistence will be deferred
       set({ 
-        rawTransactions: allNormalized,
         fileNames: [file.name],
         fileSizes: [file.size],
-        progress: { processed: allNormalized.length, total: allNormalized.length, percentage: 95, stage: 'complete' },
+        transactionCount: finalCount,
+        progress: { processed: finalCount, total: finalCount, percentage: 100, stage: 'complete' },
+        _skipPersistence: false,
       });
       
-      // For large datasets, persist asynchronously after a delay
-      if (shouldSkipPersistence) {
-        // IMPORTANT:
-        // Persisting 50k+ transactions as JSON can cause Chrome renderer OOM ("Aw, Snap").
-        // We intentionally keep `_skipPersistence` enabled for large datasets.
-        // This means a refresh requires re-upload for very large files, but the app won't crash.
-      }
+      console.log('File loaded and processed successfully, transactions:', finalCount);
       
-      // Set progress first
-      set({ progress: { processed: allNormalized.length, total: allNormalized.length, percentage: 100, stage: 'complete' } });
-      console.log('File loaded and processed successfully');
-      
-      // Apply filters immediately - use setTimeout to ensure state is set first
+      // Apply filters
       setTimeout(() => {
         get().applyFilters().catch((error) => {
           console.error('Error applying filters after file load:', error);
@@ -235,8 +629,26 @@ export const useStore = create<StoreState>()(
         error: error.message || 'Failed to load file. Please check the console for details.',
         progress: null,
       });
+      throw error;
     } finally {
       set({ isLoading: false });
+    }
+  },
+  
+  restoreFromIndexedDB: async () => {
+    try {
+      await dbManager.init();
+      const count = await dbManager.getCount();
+      if (count > 0) {
+        set({ _useIndexedDB: true, transactionCount: count });
+        await get().applyFilters();
+        return { status: 'restored', count };
+      }
+      return { status: 'missing', count: 0 };
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : 'Failed to access IndexedDB';
+      set({ error: msg });
+      return { status: 'error', error: msg };
     }
   },
   
@@ -263,65 +675,107 @@ export const useStore = create<StoreState>()(
   },
   
   applyFilters: async () => {
-    const { rawTransactions, filters } = get();
+    const { rawTransactions, filters, _useIndexedDB, transactionCount } = get();
     
-    if (rawTransactions.length === 0) {
-      set({ filteredTransactions: [], globalMetrics: null, dailyTrends: [], analysisStage: null });
+    const totalCount = _useIndexedDB ? transactionCount : rawTransactions.length;
+    
+    if (totalCount === 0) {
+      set({ filteredTransactions: [], filteredTransactionCount: 0, globalMetrics: null, dailyTrends: [], analysisStage: null });
       return;
     }
 
     // Signal UI that we're doing heavy work post-upload / post-filter change
     set({ analysisStage: 'FILTERING' });
 
-    // Stream filter in a single pass (no chunk slicing / extra arrays).
-    const filtered: Transaction[] = [];
+    if (_useIndexedDB) {
+      // For large datasets in IndexedDB, compute count + metrics in ONE streaming pass
+      // to avoid double-scanning and to prevent loading huge arrays into memory.
+      set({ analysisStage: 'COMPUTING', filteredTransactions: [] });
+      await dbManager.init();
+      const agg = await dbManager.aggregateMetrics({
+        startDate: filters.dateRange.start || undefined,
+        endDate: filters.dateRange.end || undefined,
+        paymentModes: filters.paymentModes.length > 0 ? filters.paymentModes : undefined,
+        merchantIds: filters.merchantIds.length > 0 ? filters.merchantIds : undefined,
+        pgs: filters.pgs.length > 0 ? filters.pgs : undefined,
+        banks: filters.banks.length > 0 ? filters.banks : undefined,
+        cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
+      });
 
-    const endDate = filters.dateRange.end ? new Date(filters.dateRange.end) : null;
-    if (endDate) endDate.setHours(23, 59, 59, 999);
+      const globalMetrics = {
+        totalCount: agg.totalCount,
+        successCount: agg.successCount,
+        failedCount: agg.failedCount,
+        userDroppedCount: agg.userDroppedCount,
+        sr: calculateSR(agg.successCount, agg.totalCount),
+        successGmv: agg.successGmv,
+        failedPercent: calculateSR(agg.failedCount, agg.totalCount),
+        userDroppedPercent: calculateSR(agg.userDroppedCount, agg.totalCount),
+      };
 
-    const paymentModeSet = filters.paymentModes.length > 0 ? new Set(filters.paymentModes) : null;
-    const merchantIdSet = filters.merchantIds.length > 0 ? new Set(filters.merchantIds) : null;
-    const pgSet = filters.pgs.length > 0 ? new Set(filters.pgs) : null;
-    const bankSet = filters.banks.length > 0 ? new Set(filters.banks) : null;
-    const cardTypeSet = filters.cardTypes.length > 0 ? new Set(filters.cardTypes) : null;
+      const dailyTrends = agg.dailyTrends.map((d) => ({
+        ...d,
+        sr: calculateSR(d.successCount, d.volume),
+      }));
 
-    const yieldEvery = rawTransactions.length > 200000 ? 5000 : 10000;
+      set({
+        filteredTransactionCount: agg.totalCount,
+        globalMetrics,
+        dailyTrends,
+        analysisStage: null,
+      });
+      return;
+    } else {
+      // Small dataset - filter in memory
+      const filtered: Transaction[] = [];
 
-    for (let i = 0; i < rawTransactions.length; i++) {
-      const tx = rawTransactions[i];
+      const endDate = filters.dateRange.end ? new Date(filters.dateRange.end) : null;
+      if (endDate) endDate.setHours(23, 59, 59, 999);
 
-      const pg = String(tx.pg || '').trim().toUpperCase();
-      if (pg === 'N/A' || pg === 'NA' || pg === '') continue;
+      const paymentModeSet = filters.paymentModes.length > 0 ? new Set(filters.paymentModes) : null;
+      const merchantIdSet = filters.merchantIds.length > 0 ? new Set(filters.merchantIds) : null;
+      const pgSet = filters.pgs.length > 0 ? new Set(filters.pgs) : null;
+      const bankSet = filters.banks.length > 0 ? new Set(filters.banks) : null;
+      const cardTypeSet = filters.cardTypes.length > 0 ? new Set(filters.cardTypes) : null;
 
-      if (filters.dateRange.start && tx.txtime < filters.dateRange.start) continue;
-      if (endDate && tx.txtime > endDate) continue;
+      const yieldEvery = rawTransactions.length > 200000 ? 5000 : 10000;
 
-      if (paymentModeSet && !paymentModeSet.has(tx.paymentmode)) continue;
+      for (let i = 0; i < rawTransactions.length; i++) {
+        const tx = rawTransactions[i];
 
-      if (merchantIdSet) {
-        const merchantId = String(tx.merchantid || '').trim();
-        if (!merchantIdSet.has(merchantId)) continue;
+        const pg = String(tx.pg || '').trim().toUpperCase();
+        if (pg === 'N/A' || pg === 'NA' || pg === '') continue;
+
+        if (filters.dateRange.start && tx.txtime < filters.dateRange.start) continue;
+        if (endDate && tx.txtime > endDate) continue;
+
+        if (paymentModeSet && !paymentModeSet.has(tx.paymentmode)) continue;
+
+        if (merchantIdSet) {
+          const merchantId = String(tx.merchantid || '').trim();
+          if (!merchantIdSet.has(merchantId)) continue;
+        }
+
+        if (pgSet && !pgSet.has(tx.pg)) continue;
+
+        if (bankSet) {
+          const flow = classifyUPIFlow(tx.bankname);
+          if (!bankSet.has(flow) && !bankSet.has(tx.bankname)) continue;
+        }
+
+        if (cardTypeSet && !cardTypeSet.has(tx.cardtype)) continue;
+
+        filtered.push(tx);
+
+        if (i % yieldEvery === 0) {
+          // Yield to keep UI responsive
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
       }
 
-      if (pgSet && !pgSet.has(tx.pg)) continue;
-
-      if (bankSet) {
-        const flow = classifyUPIFlow(tx.bankname);
-        if (!bankSet.has(flow) && !bankSet.has(tx.bankname)) continue;
-      }
-
-      if (cardTypeSet && !cardTypeSet.has(tx.cardtype)) continue;
-
-      filtered.push(tx);
-
-      if (i % yieldEvery === 0) {
-        // Yield to keep UI responsive
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      }
+      set({ filteredTransactions: filtered, filteredTransactionCount: filtered.length });
     }
-
-    set({ filteredTransactions: filtered });
 
     // Defer metrics computation
     cancelPendingMetrics();
@@ -351,20 +805,27 @@ export const useStore = create<StoreState>()(
   },
   
   computeMetrics: async () => {
-    const { filteredTransactions } = get();
+    const { filteredTransactions, _useIndexedDB, filteredTransactionCount } = get();
     
-    if (filteredTransactions.length === 0) {
+    const hasData = _useIndexedDB ? filteredTransactionCount > 0 : filteredTransactions.length > 0;
+    
+    if (!hasData) {
       set({ globalMetrics: null, dailyTrends: [], analysisStage: null });
       return;
     }
     
-    // Compute metrics on main thread (no worker cloning), but yield occasionally for huge sets.
+    // Compute metrics on main thread
     const { computeMetricsSync } = await import('@/lib/filter-utils');
 
-    // For very large datasets, chunking+yield is handled by applyFilters already, and
-    // computeMetricsSync is a single pass; keep it synchronous for correctness/simplicity.
-    const result = computeMetricsSync(filteredTransactions);
-    set({ globalMetrics: result.globalMetrics, dailyTrends: result.dailyTrends, analysisStage: null });
+    if (_useIndexedDB) {
+      // Keep as a safe fallback: in IndexedDB mode, metrics are computed in applyFilters()
+      // via dbManager.aggregateMetrics(), so we just clear the stage here.
+      set({ analysisStage: null });
+    } else {
+      // Small dataset - compute directly
+      const result = computeMetricsSync(filteredTransactions);
+      set({ globalMetrics: result.globalMetrics, dailyTrends: result.dailyTrends, analysisStage: null });
+    }
   },
   
   addDataFromFile: async (file: File) => {
@@ -374,8 +835,9 @@ export const useStore = create<StoreState>()(
       const fileSizeMB = file.size / 1024 / 1024;
       console.log('Adding file:', file.name, 'Size:', fileSizeMB.toFixed(2), 'MB');
       
-      if (fileSizeMB > 2000) {
-        throw new Error('File is too large (>2GB). Please split your data into smaller files.');
+      // Allow multi-GB files, but warn: these should be CSV and will stream through IndexedDB.
+      if (fileSizeMB > 6000) {
+        throw new Error('File is too large (>6GB). Please split your data into smaller files.');
       }
       
       const fileExtension = file.name.split('.').pop()?.toLowerCase();
@@ -447,26 +909,34 @@ export const useStore = create<StoreState>()(
         error: error.message || 'Failed to add file. Please check the console for details.',
         progress: null,
       });
+      throw error;
     } finally {
       set({ isLoading: false });
     }
   },
   
-  clearData: () => {
+  clearData: async () => {
     // Cancel any ongoing worker processing
     workerManager.cancel();
+    await dbManager.init();
+    await dbManager.clear();
     set({
       rawTransactions: [],
       filteredTransactions: [],
+      transactionCount: 0,
+      filteredTransactionCount: 0,
       globalMetrics: null,
       dailyTrends: [],
       fileNames: [],
       fileSizes: [],
+      isSampledDataset: false,
+      sampledFromBytes: 0,
       error: null,
       progress: null,
       filters: defaultFilters,
       analysisStage: null,
       _skipPersistence: false,
+      _useIndexedDB: false,
     });
   },
   
@@ -483,12 +953,16 @@ export const useStore = create<StoreState>()(
           return {
             fileNames: state.fileNames,
             fileSizes: state.fileSizes,
+            _useIndexedDB: state._useIndexedDB,
+            transactionCount: state.transactionCount,
           };
         }
         return {
           rawTransactions: state.rawTransactions,
           fileNames: state.fileNames,
           fileSizes: state.fileSizes,
+          _useIndexedDB: state._useIndexedDB,
+          transactionCount: state.transactionCount,
         };
       },
       merge: (persistedState: any, currentState: StoreState) => {
@@ -502,6 +976,19 @@ export const useStore = create<StoreState>()(
             ...currentState,
             ...persistedState,
             rawTransactions: transactions,
+            // Preserve IndexedDB flags if present
+            _useIndexedDB: persistedState._useIndexedDB ?? currentState._useIndexedDB,
+            transactionCount: persistedState.transactionCount ?? currentState.transactionCount,
+          };
+        }
+        // For IndexedDB mode (no rawTransactions but has fileNames)
+        if (persistedState && persistedState.fileNames && persistedState.fileNames.length > 0) {
+          return {
+            ...currentState,
+            ...persistedState,
+            // Preserve IndexedDB flags if present
+            _useIndexedDB: persistedState._useIndexedDB ?? currentState._useIndexedDB,
+            transactionCount: persistedState.transactionCount ?? currentState.transactionCount,
           };
         }
         return { ...currentState, ...persistedState };
@@ -510,18 +997,42 @@ export const useStore = create<StoreState>()(
         // Mark hydration complete regardless of persisted state presence
         useStore.setState({ hasHydrated: true });
 
-        // After rehydration, apply filters to recompute metrics
-        if (state && state.rawTransactions && state.rawTransactions.length > 0) {
-          // Use setTimeout to ensure state is fully rehydrated
-          setTimeout(() => {
-            const store = useStore.getState();
+        // After rehydration, check for data and restore state
+        setTimeout(async () => {
+          const store = useStore.getState();
+          
+          // If we already have IndexedDB mode restored from persistence, verify and apply filters
+          if (store._useIndexedDB && store.transactionCount > 0) {
+            // State already restored, just apply filters
+            void store.applyFilters().catch((e) => {
+              console.error('Error applying filters after rehydrate:', e);
+            });
+            return;
+          }
+          
+          // If we have file metadata but no in-memory data, attempt to restore from IndexedDB.
+          const hasFileMeta = Boolean(state && state.fileNames && state.fileNames.length > 0);
+          const hasInMemory = Boolean(state && state.rawTransactions && state.rawTransactions.length > 0);
+          if (hasFileMeta && !hasInMemory && store.transactionCount === 0) {
+            const res = await store.restoreFromIndexedDB();
+            if (res.status === 'missing') {
+              // Don't spin forever: surface an actionable error (user can hit Replace/Clear).
+              useStore.setState({
+                error: 'No dataset found in browser storage. Please click Replace and re-upload the file.',
+              });
+            }
+            return;
+          }
+          
+          // For small files with in-memory data
+          if (state && state.rawTransactions && state.rawTransactions.length > 0) {
             if (store.rawTransactions.length > 0) {
               void store.applyFilters().catch((e) => {
                 console.error('Error applying filters after rehydrate:', e);
               });
             }
-          }, 100);
-        }
+          }
+        }, 100);
       },
       // Skip persistence during loading to avoid blocking
       skipHydration: false,

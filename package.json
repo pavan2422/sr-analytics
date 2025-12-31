@@ -3,8 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "clean": "rm -rf .next .next-dev",
+    "clean:dev": "rm -rf .next-dev",
+    "clean:build": "rm -rf .next",
+    "dev": "npm run clean:dev && next dev",
+    "build": "npm run clean:build && next build",
     "start": "next start",
     "lint": "next lint"
   },
@@ -36,6 +39,11 @@
     "eslint-config-next": "^14.2.5"
   }
 }
+
+
+
+
+
 
 
 

@@ -10,7 +10,37 @@ interface ChartProps {
   height?: number;
 }
 
+// Sample data for large datasets to improve performance
+// For 5GB files, we need very aggressive sampling
+function sampleData<T extends { date: string }>(data: T[], maxPoints: number = 1000): T[] {
+  if (data.length <= maxPoints) return data;
+  
+  // For very large datasets (>10k points), use more aggressive sampling
+  const actualMaxPoints = data.length > 10000 ? 500 : maxPoints;
+  
+  // Use evenly distributed sampling
+  const step = Math.ceil(data.length / actualMaxPoints);
+  const sampled: T[] = [];
+  
+  for (let i = 0; i < data.length; i += step) {
+    sampled.push(data[i]);
+  }
+  
+  // Always include the first and last point
+  if (sampled.length === 0 || sampled[0] !== data[0]) {
+    sampled.unshift(data[0]);
+  }
+  if (sampled.length === 0 || sampled[sampled.length - 1] !== data[data.length - 1]) {
+    sampled.push(data[data.length - 1]);
+  }
+  
+  return sampled;
+}
+
 function ChartComponent({ data, type = 'dual', height = 400 }: ChartProps) {
+  // Sample data if it's too large to prevent rendering issues
+  const sampledData = useMemo(() => sampleData(data, 1000), [data]);
+  
   const option = useMemo(() => {
     if (type === 'volume') {
       return {
@@ -30,7 +60,7 @@ function ChartComponent({ data, type = 'dual', height = 400 }: ChartProps) {
         },
         xAxis: {
           type: 'category',
-          data: data.map((d) => d.date),
+          data: sampledData.map((d) => d.date),
           axisLine: { lineStyle: { color: '#2a2a2a' } },
           axisLabel: { color: '#a1a1aa' },
         },
@@ -44,7 +74,7 @@ function ChartComponent({ data, type = 'dual', height = 400 }: ChartProps) {
           {
             name: 'Volume',
             type: 'bar',
-            data: data.map((d) => d.volume),
+            data: sampledData.map((d) => d.volume),
             itemStyle: { color: '#3b82f6' },
           },
         ],
@@ -68,7 +98,7 @@ function ChartComponent({ data, type = 'dual', height = 400 }: ChartProps) {
         },
         xAxis: {
           type: 'category',
-          data: data.map((d) => d.date),
+          data: sampledData.map((d) => d.date),
           axisLine: { lineStyle: { color: '#2a2a2a' } },
           axisLabel: { color: '#a1a1aa' },
         },
@@ -84,7 +114,7 @@ function ChartComponent({ data, type = 'dual', height = 400 }: ChartProps) {
           {
             name: 'SR %',
             type: 'line',
-            data: data.map((d) => d.sr),
+            data: sampledData.map((d) => d.sr),
             smooth: true,
             itemStyle: { color: '#10b981' },
             areaStyle: {
@@ -128,7 +158,7 @@ function ChartComponent({ data, type = 'dual', height = 400 }: ChartProps) {
       },
       xAxis: {
         type: 'category',
-        data: data.map((d) => d.date),
+        data: sampledData.map((d) => d.date),
         axisLine: { lineStyle: { color: '#2a2a2a' } },
         axisLabel: { color: '#a1a1aa' },
       },
@@ -157,20 +187,20 @@ function ChartComponent({ data, type = 'dual', height = 400 }: ChartProps) {
           name: 'Volume',
           type: 'bar',
           yAxisIndex: 0,
-          data: data.map((d) => d.volume),
+          data: sampledData.map((d) => d.volume),
           itemStyle: { color: '#3b82f6' },
         },
         {
           name: 'SR %',
           type: 'line',
           yAxisIndex: 1,
-          data: data.map((d) => d.sr),
+          data: sampledData.map((d) => d.sr),
           smooth: true,
           itemStyle: { color: '#10b981' },
         },
       ],
     };
-  }, [data, type]);
+  }, [sampledData, type]);
 
   if (data.length === 0) {
     return (
@@ -184,11 +214,18 @@ function ChartComponent({ data, type = 'dual', height = 400 }: ChartProps) {
   }
 
   return (
-    <ReactECharts
-      option={option}
-      style={{ height: `${height}px`, width: '100%' }}
-      opts={{ renderer: 'canvas' }}
-    />
+    <div>
+      {data.length > 1000 && (
+        <div className="text-xs text-muted-foreground mb-2 px-2">
+          Showing sampled data ({sampledData.length} of {data.length} points for performance)
+        </div>
+      )}
+      <ReactECharts
+        option={option}
+        style={{ height: `${height}px`, width: '100%' }}
+        opts={{ renderer: 'canvas' }}
+      />
+    </div>
   );
 }
 

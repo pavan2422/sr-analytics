@@ -1,253 +1,68 @@
 'use client';
 
-import { useMemo, useDeferredValue } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '@/store/useStore';
 import { KPICard } from '@/components/KPICard';
 import { Chart } from '@/components/Chart';
 import { OverviewChart } from '@/components/OverviewChart';
-import { formatNumber, formatCurrency, calculateSR } from '@/lib/utils';
+import { formatNumber, formatCurrency } from '@/lib/utils';
 import { Transaction } from '@/types';
+import { computeOverviewBreakdowns } from '@/lib/overview-breakdowns';
 
 export function OverviewTab() {
   // Use selectors to only subscribe to needed state slices
   const globalMetrics = useStore((state) => state.globalMetrics);
   const dailyTrends = useStore((state) => state.dailyTrends);
+  const _useIndexedDB = useStore((state) => state._useIndexedDB);
   const filteredTransactions = useStore((state) => state.filteredTransactions);
-  
-  // Defer heavy computation to prevent blocking
-  const deferredTransactions = useDeferredValue(filteredTransactions);
+  const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
+  const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
+  const filters = useStore((state) => state.filters);
 
-  // OPTIMIZED: Single pass computation for all metrics
-  // This replaces 9 separate useMemo hooks that each iterated through all transactions
-  const allMetrics = useMemo(() => {
-    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    
-    if (!deferredTransactions || deferredTransactions.length === 0) {
-      return {
-        statusDistribution: [],
-        paymentModeData: [],
-        hourlyData: Array.from({ length: 24 }, (_, hour) => ({
-          name: `${hour.toString().padStart(2, '0')}:00`,
-          volume: 0,
-          sr: 0,
-        })),
-        pgData: [],
-        failureReasonsData: [],
-        dayOfWeekData: dayNames.map((day: string) => ({ name: day, volume: 0, sr: 0 })),
-        amountDistributionData: [],
-        banksData: [],
-        scatterData: [],
-      };
+  // Sample used for breakdown charts. For IndexedDB mode this is a bounded sample (memory-safe).
+  const [sample, setSample] = useState<Transaction[]>([]);
+  const [sampleStatus, setSampleStatus] = useState<'idle' | 'loading' | 'ready'>('idle');
+
+  useEffect(() => {
+    // If there's no data, clear sample
+    if (!globalMetrics || filteredTransactionCount === 0) {
+      setSample([]);
+      setSampleStatus('idle');
+      return;
     }
 
-    try {
-      // Initialize all data structures
-      const modeMap = new Map<string, { success: number; total: number }>();
-      const hourMap = new Map<number, { success: number; total: number }>();
-      const pgMap = new Map<string, { success: number; total: number }>();
-      const failureMap = new Map<string, number>();
-      const dayMap = new Map<string, { success: number; total: number }>();
-      const bankMap = new Map<string, { success: number; total: number }>();
-      
-      const ranges = [
-        { name: '0-5000', min: 0, max: 5000 },
-        { name: '5000-10000', min: 5000, max: 10000 },
-        { name: '10000-25000', min: 10000, max: 25000 },
-        { name: '25000-100000', min: 25000, max: 100000 },
-        { name: '100000-200000', min: 100000, max: 200000 },
-      ];
-      const rangeMap = new Map<string, { success: number; total: number; gmv: number }>();
-
-      // SINGLE PASS through all transactions
-      for (const tx of deferredTransactions) {
-        // Parse date once and reuse
-        let txDate: Date | null = null;
-        let hour = 0;
-        let dayName = 'Unknown';
-        
-        if (tx.txtime instanceof Date) {
-          txDate = tx.txtime;
-          hour = txDate.getHours();
-          dayName = dayNames[txDate.getDay()];
-        } else if (tx.txtime) {
-          txDate = new Date(tx.txtime);
-          if (!isNaN(txDate.getTime())) {
-            hour = txDate.getHours();
-            dayName = dayNames[txDate.getDay()];
+    let cancelled = false;
+    const run = async () => {
+      try {
+        setSampleStatus('loading');
+        if (_useIndexedDB) {
+          // For large datasets, compute from a bounded sample.
+          const txs = await getSampleFilteredTransactions(50000);
+          if (!cancelled) {
+            setSample(txs);
+            setSampleStatus('ready');
+          }
+        } else {
+          // For small datasets, use the filtered in-memory set (cap to keep UI responsive).
+          const capped = filteredTransactions.length > 200000 ? filteredTransactions.slice(0, 200000) : filteredTransactions;
+          if (!cancelled) {
+            setSample(capped);
+            setSampleStatus('ready');
           }
         }
-
-        // 1. Payment Mode Performance
-        const mode = tx.paymentmode || 'Unknown';
-        if (!modeMap.has(mode)) {
-          modeMap.set(mode, { success: 0, total: 0 });
-        }
-        const modeStats = modeMap.get(mode)!;
-        modeStats.total++;
-        if (tx.isSuccess) modeStats.success++;
-
-        // 2. Hourly Trend Analysis
-        if (!hourMap.has(hour)) {
-          hourMap.set(hour, { success: 0, total: 0 });
-        }
-        const hourStats = hourMap.get(hour)!;
-        hourStats.total++;
-        if (tx.isSuccess) hourStats.success++;
-
-        // 3. Top PG Performance
-        const pg = tx.pg || 'Unknown';
-        if (pg !== 'N/A' && pg !== 'NA' && pg !== '') {
-          if (!pgMap.has(pg)) {
-            pgMap.set(pg, { success: 0, total: 0 });
-          }
-          const pgStats = pgMap.get(pg)!;
-          pgStats.total++;
-          if (tx.isSuccess) pgStats.success++;
-        }
-
-        // 4. Top Failure Reasons
-        if (tx.isFailed) {
-          const reason = tx.txmsg || 'Unknown';
-          failureMap.set(reason, (failureMap.get(reason) || 0) + 1);
-        }
-
-        // 5. Day of Week Analysis
-        if (!dayMap.has(dayName)) {
-          dayMap.set(dayName, { success: 0, total: 0 });
-        }
-        const dayStats = dayMap.get(dayName)!;
-        dayStats.total++;
-        if (tx.isSuccess) dayStats.success++;
-
-        // 6. Transaction Amount Distribution
-        const amount = tx.txamount || 0;
-        const range = ranges.find(r => amount >= r.min && amount < r.max);
-        const rangeName = range ? range.name : '200000+';
-        if (!rangeMap.has(rangeName)) {
-          rangeMap.set(rangeName, { success: 0, total: 0, gmv: 0 });
-        }
-        const rangeStats = rangeMap.get(rangeName)!;
-        rangeStats.total++;
-        if (tx.isSuccess) {
-          rangeStats.success++;
-          rangeStats.gmv += amount;
-        }
-
-        // 7. Top Banks Performance
-        const bank = tx.bankname || 'Unknown';
-        if (bank !== 'N/A' && bank !== 'NA' && bank !== '') {
-          if (!bankMap.has(bank)) {
-            bankMap.set(bank, { success: 0, total: 0 });
-          }
-          const bankStats = bankMap.get(bank)!;
-          bankStats.total++;
-          if (tx.isSuccess) bankStats.success++;
+      } catch (e) {
+        if (!cancelled) {
+          setSample([]);
+          setSampleStatus('ready');
         }
       }
+    };
 
-      // Build results from maps
-      const paymentModeData = Array.from(modeMap.entries())
-        .map(([name, stats]) => ({
-          name,
-          volume: stats.total,
-          sr: calculateSR(stats.success, stats.total),
-        }))
-        .sort((a, b) => b.volume - a.volume);
-
-      const hourlyData = Array.from({ length: 24 }, (_, hour) => {
-        const stats = hourMap.get(hour) || { success: 0, total: 0 };
-        return {
-          name: `${hour.toString().padStart(2, '0')}:00`,
-          volume: stats.total,
-          sr: calculateSR(stats.success, stats.total),
-        };
-      });
-
-      const pgData = Array.from(pgMap.entries())
-        .map(([name, stats]) => ({
-          name,
-          volume: stats.total,
-          sr: calculateSR(stats.success, stats.total),
-        }))
-        .sort((a, b) => b.volume - a.volume)
-        .slice(0, 10);
-
-      const failureReasonsData = Array.from(failureMap.entries())
-        .map(([name, count]) => ({
-          name,
-          volume: count,
-        }))
-        .sort((a, b) => b.volume - a.volume)
-        .slice(0, 10);
-
-      const dayOfWeekData = dayNames.map((day) => {
-        const stats = dayMap.get(day) || { success: 0, total: 0 };
-        return {
-          name: day,
-          volume: stats.total,
-          sr: calculateSR(stats.success, stats.total),
-        };
-      });
-
-      const allRanges = [...ranges];
-      if (rangeMap.has('200000+')) {
-        allRanges.push({ name: '200000+', min: 200000, max: Infinity });
-      }
-      const amountDistributionData = allRanges.map((range) => {
-        const stats = rangeMap.get(range.name) || { success: 0, total: 0, gmv: 0 };
-        return {
-          name: `₹${range.name}`,
-          volume: stats.total,
-          gmv: stats.gmv,
-          sr: calculateSR(stats.success, stats.total),
-        };
-      });
-
-      const banksData = Array.from(bankMap.entries())
-        .map(([name, stats]) => ({
-          name,
-          volume: stats.total,
-          sr: calculateSR(stats.success, stats.total),
-        }))
-        .sort((a, b) => b.volume - a.volume)
-        .slice(0, 10);
-
-      const scatterData = paymentModeData.map((d) => ({
-        name: d.name,
-        volume: d.volume,
-        sr: d.sr || 0,
-      }));
-
-      return {
-        paymentModeData,
-        hourlyData,
-        pgData,
-        failureReasonsData,
-        dayOfWeekData,
-        amountDistributionData,
-        banksData,
-        scatterData,
-      };
-    } catch (error) {
-      console.error('Error computing metrics:', error);
-      // Return empty data on error to prevent crash
-      return {
-        statusDistribution: [],
-        paymentModeData: [],
-        hourlyData: Array.from({ length: 24 }, (_, hour) => ({
-          name: `${hour.toString().padStart(2, '0')}:00`,
-          volume: 0,
-          sr: 0,
-        })),
-        pgData: [],
-        failureReasonsData: [],
-        dayOfWeekData: dayNames.map((day: string) => ({ name: day, volume: 0, sr: 0 })),
-        amountDistributionData: [],
-        banksData: [],
-        scatterData: [],
-      };
-    }
-  }, [deferredTransactions]);
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [_useIndexedDB, filteredTransactionCount, filteredTransactions, getSampleFilteredTransactions, globalMetrics, filters]);
 
   // Transaction Status Distribution (from globalMetrics - no need to recompute)
   const statusDistribution = useMemo(() => {
@@ -268,6 +83,10 @@ export function OverviewTab() {
     }));
   }, [dailyTrends]);
 
+  const breakdowns = useMemo(() => {
+    return computeOverviewBreakdowns(sample, dailyTrends);
+  }, [sample, dailyTrends]);
+
   const {
     paymentModeData,
     hourlyData,
@@ -277,22 +96,14 @@ export function OverviewTab() {
     amountDistributionData,
     banksData,
     scatterData,
-  } = allMetrics;
+  } = breakdowns;
 
   // Show loading state if data is being computed
-  if (!globalMetrics && filteredTransactions.length > 0) {
+  if (!globalMetrics) {
     return (
       <div className="flex items-center justify-center p-12">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
         <p className="text-muted-foreground ml-4">Computing metrics...</p>
-      </div>
-    );
-  }
-  
-  if (!globalMetrics) {
-    return (
-      <div className="flex items-center justify-center p-12">
-        <p className="text-muted-foreground">No data available. Please upload a file.</p>
       </div>
     );
   }
@@ -345,6 +156,9 @@ export function OverviewTab() {
         {/* 2. Payment Mode Performance */}
         <div className="bg-card border border-border rounded-lg p-6">
           <h3 className="text-lg font-semibold mb-4">Payment Mode Performance</h3>
+          {_useIndexedDB && sampleStatus === 'loading' && (
+            <p className="text-xs text-muted-foreground mb-2">Loading breakdowns from browser storage (sampled)…</p>
+          )}
           <OverviewChart type="paymentMode" data={paymentModeData} height={350} />
         </div>
 

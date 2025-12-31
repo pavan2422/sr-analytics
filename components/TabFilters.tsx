@@ -1,23 +1,57 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '@/store/useStore';
 import { cn } from '@/lib/utils';
 import { MultiSelect } from '@/components/MultiSelect';
 import { classifyUPIFlow } from '@/lib/data-normalization';
+import { Transaction } from '@/types';
 
 interface TabFiltersProps {
   paymentMode: string[];
 }
 
 export function TabFilters({ paymentMode }: TabFiltersProps) {
-  const { rawTransactions, filters, setFilters } = useStore();
+  const rawTransactions = useStore((s) => s.rawTransactions);
+  const filters = useStore((s) => s.filters);
+  const setFilters = useStore((s) => s.setFilters);
+  const _useIndexedDB = useStore((s) => s._useIndexedDB);
+  const filteredTransactionCount = useStore((s) => s.filteredTransactionCount);
+  const getSampleFilteredTransactions = useStore((s) => s.getSampleFilteredTransactions);
+
+  const [sample, setSample] = useState<Transaction[]>([]);
+  const paymentModeKey = useMemo(() => paymentMode.join('|'), [paymentMode]);
+
+  useEffect(() => {
+    if (!_useIndexedDB) {
+      setSample([]);
+      return;
+    }
+    if (filteredTransactionCount === 0) {
+      setSample([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        // Sample only relevant payment modes for this tab so options are meaningful.
+        const txs = await getSampleFilteredTransactions(50000, { paymentModes: paymentMode });
+        if (!cancelled) setSample(txs);
+      } catch {
+        if (!cancelled) setSample([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions, paymentModeKey, paymentMode]);
 
   // Filter transactions by payment mode
   const filteredTxs = useMemo(() => {
-    if (paymentMode.length === 0) return rawTransactions;
-    return rawTransactions.filter((tx) => paymentMode.includes(tx.paymentmode));
-  }, [rawTransactions, paymentMode]);
+    const source = _useIndexedDB ? sample : rawTransactions;
+    if (paymentMode.length === 0) return source;
+    return source.filter((tx) => paymentMode.includes(tx.paymentmode));
+  }, [_useIndexedDB, sample, rawTransactions, paymentMode]);
 
   const pgs = useMemo(() => {
     return Array.from(

@@ -39,6 +39,30 @@ interface OverviewChartProps {
   height?: number;
 }
 
+// Chart Safety Limits: Cap categories at 50, skip <0.1%
+function applyChartSafetyLimits(barData: BarChartData[]): BarChartData[] {
+  if (barData.length === 0) return barData;
+  
+  const totalVolume = barData.reduce((sum, d) => sum + (d.volume || 0), 0);
+  const minVolumeThreshold = totalVolume * 0.001; // 0.1% threshold
+  
+  let filteredData = barData.filter(d => (d.volume || 0) >= minVolumeThreshold);
+  
+  // Sort by volume and cap at 50
+  filteredData.sort((a, b) => (b.volume || 0) - (a.volume || 0));
+  if (filteredData.length > 50) {
+    const top50 = filteredData.slice(0, 50);
+    const others = filteredData.slice(50);
+    const othersVolume = others.reduce((sum, d) => sum + (d.volume || 0), 0);
+    const othersSR = othersVolume > 0 
+      ? others.reduce((sum, d) => sum + ((d.sr || 0) * (d.volume || 0)), 0) / othersVolume
+      : 0;
+    filteredData = [...top50, { name: 'OTHER', volume: othersVolume, sr: othersSR }];
+  }
+  
+  return filteredData;
+}
+
 function OverviewChartComponent({ type, data, height = 400 }: OverviewChartProps) {
   const option = useMemo(() => {
     if (type === 'donut') {
@@ -92,7 +116,7 @@ function OverviewChartComponent({ type, data, height = 400 }: OverviewChartProps
     }
 
     if (type === 'paymentMode') {
-      const barData = data as BarChartData[];
+      const barData = applyChartSafetyLimits(data as BarChartData[]);
       return {
         backgroundColor: 'transparent',
         tooltip: {
@@ -243,7 +267,7 @@ function OverviewChartComponent({ type, data, height = 400 }: OverviewChartProps
     }
 
     if (type === 'pg') {
-      const barData = data as BarChartData[];
+      const barData = applyChartSafetyLimits(data as BarChartData[]);
       return {
         backgroundColor: 'transparent',
         tooltip: {
@@ -313,7 +337,8 @@ function OverviewChartComponent({ type, data, height = 400 }: OverviewChartProps
     }
 
     if (type === 'failureReasons') {
-      const barData = data as BarChartData[];
+      const barData = applyChartSafetyLimits(data as BarChartData[]);
+      const showValueLabels = barData.length <= 20;
       return {
         backgroundColor: 'transparent',
         tooltip: {
@@ -328,11 +353,11 @@ function OverviewChartComponent({ type, data, height = 400 }: OverviewChartProps
           },
         },
         grid: {
-          left: '20%',
+          left: '28%',
           right: '4%',
-          bottom: '3%',
+          bottom: '10%',
           top: '3%',
-          containLabel: false,
+          containLabel: true,
         },
         xAxis: {
           type: 'value',
@@ -342,10 +367,30 @@ function OverviewChartComponent({ type, data, height = 400 }: OverviewChartProps
         },
         yAxis: {
           type: 'category',
-          data: barData.map((d) => d.name.length > 40 ? d.name.substring(0, 40) + '...' : d.name),
+          data: barData.map((d) => d.name),
           axisLine: { lineStyle: { color: '#2a2a2a' } },
-          axisLabel: { color: '#a1a1aa' },
+          axisLabel: {
+            color: '#a1a1aa',
+            width: 260,
+            overflow: 'truncate',
+          },
         },
+        dataZoom: barData.length > 20 ? [
+          {
+            type: 'slider',
+            yAxisIndex: 0,
+            width: 10,
+            right: 4,
+            start: 0,
+            end: Math.min(100, Math.max(30, (20 / barData.length) * 100)),
+          },
+          {
+            type: 'inside',
+            yAxisIndex: 0,
+            start: 0,
+            end: Math.min(100, Math.max(30, (20 / barData.length) * 100)),
+          },
+        ] : [],
         series: [
           {
             name: 'Failure Count',
@@ -353,7 +398,7 @@ function OverviewChartComponent({ type, data, height = 400 }: OverviewChartProps
             data: barData.map((d) => d.volume),
             itemStyle: { color: '#ef4444' },
             label: {
-              show: true,
+              show: showValueLabels,
               position: 'right',
               color: '#ffffff',
               formatter: '{c}',

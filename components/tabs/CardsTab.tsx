@@ -1,23 +1,52 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '@/store/useStore';
 import { computeCardMetrics } from '@/lib/metrics';
 import { DataTable } from '@/components/DataTable';
 import { Chart } from '@/components/Chart';
 import { TabFilters } from '@/components/TabFilters';
 import { ColumnDef } from '@tanstack/react-table';
-import { GroupedMetrics, FailureRCA } from '@/types';
+import { GroupedMetrics, FailureRCA, Transaction } from '@/types';
 import { formatNumber } from '@/lib/utils';
+
+const CARD_PAYMENT_MODES = ['CREDIT_CARD', 'DEBIT_CARD', 'PREPAID_CARD'] as const;
 
 export function CardsTab() {
   // Use selector to only subscribe to filteredTransactions
   const filteredTransactions = useStore((state) => state.filteredTransactions);
-  const cardPaymentModes = ['CREDIT_CARD', 'DEBIT_CARD', 'PREPAID_CARD'];
+  const _useIndexedDB = useStore((state) => state._useIndexedDB);
+  const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
+  const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
+  const filters = useStore((state) => state.filters);
+
+  const [sample, setSample] = useState<Transaction[]>([]);
+
+  useEffect(() => {
+    if (!_useIndexedDB) {
+      setSample([]);
+      return;
+    }
+    if (filteredTransactionCount === 0) {
+      setSample([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const txs = await getSampleFilteredTransactions(100000, { paymentModes: CARD_PAYMENT_MODES as unknown as string[] });
+      if (!cancelled) setSample(txs);
+    })().catch(() => {
+      if (!cancelled) setSample([]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions, filters]);
 
   const cardMetrics = useMemo(() => {
-    return computeCardMetrics(filteredTransactions);
-  }, [filteredTransactions]);
+    const source = _useIndexedDB ? sample : filteredTransactions;
+    return computeCardMetrics(source);
+  }, [filteredTransactions, _useIndexedDB, sample]);
 
   const baseColumns: ColumnDef<GroupedMetrics>[] = useMemo(
     () => [
@@ -92,7 +121,7 @@ export function CardsTab() {
   return (
     <div className="space-y-8">
       {/* Tab-specific Filters */}
-      <TabFilters paymentMode={cardPaymentModes} />
+      <TabFilters paymentMode={CARD_PAYMENT_MODES as unknown as string[]} />
 
       {/* PG Level */}
       <div>
@@ -155,6 +184,11 @@ export function CardsTab() {
           <div>
             <h4 className="text-md font-medium mb-2">Native OTP Action</h4>
             <DataTable data={cardMetrics.authLevels.nativeOtpAction} columns={baseColumns} height={200} />
+          </div>
+          
+          <div>
+            <h4 className="text-md font-medium mb-2">Card PAR</h4>
+            <DataTable data={cardMetrics.authLevels.cardPar} columns={baseColumns} height={200} />
           </div>
         </div>
       </div>

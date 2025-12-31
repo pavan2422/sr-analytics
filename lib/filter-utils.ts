@@ -153,3 +153,8 @@ export function computeMetricsSync(transactions: Transaction[]): { globalMetrics
   return { globalMetrics: metrics, dailyTrends };
 }
 
+
+
+
+
+

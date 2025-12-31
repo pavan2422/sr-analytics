@@ -114,14 +114,25 @@ export function normalizeData(rawData: any[]): Transaction[] {
     normalized.pg = String(normalized.pg || '').trim();
     normalized.bankname = String(normalized.bankname || '').trim();
     normalized.cardnumber = String(normalized.cardnumber || '').trim();
+    normalized.cardmasked = String(normalized.cardmasked || '').trim();
     normalized.cardtype = String(normalized.cardtype || '').trim();
     normalized.cardcountry = String(normalized.cardcountry || '').trim();
     normalized.processingcardtype = String(normalized.processingcardtype || '').trim();
     normalized.nativeotpurleligible = String(normalized.nativeotpurleligible || '').trim();
     normalized.card_isfrictionless = String(normalized.card_isfrictionless || '').trim();
     normalized.card_nativeotpaction = String(normalized.card_nativeotpaction || '').trim();
+    normalized.card_par = String(normalized.card_par || '').trim();
+    normalized.iscvvpresent = String(normalized.iscvvpresent ?? '').trim();
     normalized.upi_psp = String(normalized.upi_psp || '').trim();
     normalized.txmsg = String(normalized.txmsg || '').trim();
+
+    // New error taxonomy fields (cashfree + pg)
+    normalized.cf_errorcode = String(normalized.cf_errorcode || '').trim();
+    normalized.cf_errorreason = String(normalized.cf_errorreason || '').trim();
+    normalized.cf_errorsource = String(normalized.cf_errorsource || '').trim();
+    normalized.cf_errordescription = String(normalized.cf_errordescription || '').trim();
+    normalized.pg_errorcode = String(normalized.pg_errorcode || '').trim();
+    normalized.pg_errormessage = String(normalized.pg_errormessage || '').trim();
     
     return normalized as Transaction;
   }).filter((tx) => tx !== null) as Transaction[];

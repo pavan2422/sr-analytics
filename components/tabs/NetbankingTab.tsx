@@ -1,23 +1,52 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '@/store/useStore';
 import { computeNetbankingMetrics } from '@/lib/metrics';
 import { DataTable } from '@/components/DataTable';
 import { Chart } from '@/components/Chart';
 import { TabFilters } from '@/components/TabFilters';
 import { ColumnDef } from '@tanstack/react-table';
-import { GroupedMetrics, FailureRCA } from '@/types';
+import { GroupedMetrics, FailureRCA, Transaction } from '@/types';
 import { formatNumber } from '@/lib/utils';
+
+const NETBANKING_PAYMENT_MODES = ['NET_BANKING'] as const;
 
 export function NetbankingTab() {
   // Use selector to only subscribe to filteredTransactions
   const filteredTransactions = useStore((state) => state.filteredTransactions);
-  const netbankingPaymentModes = ['NET_BANKING'];
+  const _useIndexedDB = useStore((state) => state._useIndexedDB);
+  const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
+  const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
+  const filters = useStore((state) => state.filters);
+
+  const [sample, setSample] = useState<Transaction[]>([]);
+
+  useEffect(() => {
+    if (!_useIndexedDB) {
+      setSample([]);
+      return;
+    }
+    if (filteredTransactionCount === 0) {
+      setSample([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const txs = await getSampleFilteredTransactions(100000, { paymentModes: NETBANKING_PAYMENT_MODES as unknown as string[] });
+      if (!cancelled) setSample(txs);
+    })().catch(() => {
+      if (!cancelled) setSample([]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions, filters]);
 
   const nbMetrics = useMemo(() => {
-    return computeNetbankingMetrics(filteredTransactions);
-  }, [filteredTransactions]);
+    const source = _useIndexedDB ? sample : filteredTransactions;
+    return computeNetbankingMetrics(source);
+  }, [filteredTransactions, _useIndexedDB, sample]);
 
   const baseColumns: ColumnDef<GroupedMetrics>[] = useMemo(
     () => [
@@ -92,7 +121,7 @@ export function NetbankingTab() {
   return (
     <div className="space-y-8">
       {/* Tab-specific Filters */}
-      <TabFilters paymentMode={netbankingPaymentModes} />
+      <TabFilters paymentMode={NETBANKING_PAYMENT_MODES as unknown as string[]} />
 
       {/* PG Level */}
       <div>

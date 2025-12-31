@@ -1,5 +1,6 @@
 import { Transaction } from '@/types';
 import { calculateSR } from '@/lib/utils';
+import { getFailureLabel } from '@/lib/failure-utils';
 
 export type CustomerType = 
   | 'RETRY_CUSTOMER'      // Same card/UPI attempting multiple times
@@ -411,7 +412,7 @@ export function detectProblematicCustomers(
     // Find top failure reason for retry transactions
     const failureReasonCounts = new Map<string, number>();
     retryTransactions.filter(tx => tx.isFailed).forEach((tx) => {
-      const reason = tx.txmsg || 'Unknown';
+      const reason = getFailureLabel(tx) || 'Unknown';
       failureReasonCounts.set(reason, (failureReasonCounts.get(reason) || 0) + 1);
     });
 

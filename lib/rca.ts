@@ -3,6 +3,7 @@ import { calculateSR } from '@/lib/utils';
 import { classifyUPIFlow, classifyCardScope, extractUPIHandle } from '@/lib/data-normalization';
 import { detectProblematicCustomers } from '@/lib/customer-analytics';
 import { analyzeVolumeMixChanges } from '@/lib/volume-mix-analysis';
+import { getFailureCategory, getFailureLabel } from '@/lib/failure-utils';
 
 // Configuration thresholds
 const SR_DROP_THRESHOLD = 0.5; // 0.5% drop is significant
@@ -26,7 +27,14 @@ function getDimensionsForPaymentMode(paymentMode: PaymentMode): DimensionConfig[
         { name: 'Flow Type', getValue: (tx) => classifyUPIFlow(tx.bankname) },
         { name: 'Handle', getValue: (tx) => extractUPIHandle(tx.cardmasked) || 'Unknown' },
         { name: 'PSP', getValue: (tx) => tx.upi_psp || 'Unknown' },
-        { name: 'Failure Reason', getValue: (tx) => tx.txmsg || 'Unknown' },
+        { name: 'Failure Category', getValue: (tx) => getFailureCategory(tx) },
+        { name: 'CF Error Code', getValue: (tx) => tx.cf_errorcode || 'Unknown' },
+        { name: 'CF Error Source', getValue: (tx) => tx.cf_errorsource || 'Unknown' },
+        { name: 'CF Error Reason', getValue: (tx) => tx.cf_errorreason || 'Unknown' },
+        { name: 'CF Error Description', getValue: (tx) => tx.cf_errordescription || 'Unknown' },
+        { name: 'PG Error Code', getValue: (tx) => tx.pg_errorcode || 'Unknown' },
+        { name: 'PG Error Message', getValue: (tx) => tx.pg_errormessage || 'Unknown' },
+        { name: 'Failure Reason', getValue: (tx) => getFailureLabel(tx) || 'Unknown' },
       ];
     case 'CREDIT_CARD':
     case 'DEBIT_CARD':
@@ -39,19 +47,77 @@ function getDimensionsForPaymentMode(paymentMode: PaymentMode): DimensionConfig[
         { name: 'Processing Card Type', getValue: (tx) => tx.processingcardtype || 'Unknown' },
         { name: 'Native OTP Eligible', getValue: (tx) => tx.nativeotpurleligible || 'Unknown' },
         { name: 'Frictionless', getValue: (tx) => tx.card_isfrictionless || 'Unknown' },
-        { name: 'Failure Reason', getValue: (tx) => tx.txmsg || 'Unknown' },
+        { name: 'Failure Category', getValue: (tx) => getFailureCategory(tx) },
+        { name: 'CF Error Code', getValue: (tx) => tx.cf_errorcode || 'Unknown' },
+        { name: 'CF Error Source', getValue: (tx) => tx.cf_errorsource || 'Unknown' },
+        { name: 'CF Error Reason', getValue: (tx) => tx.cf_errorreason || 'Unknown' },
+        { name: 'CF Error Description', getValue: (tx) => tx.cf_errordescription || 'Unknown' },
+        { name: 'PG Error Code', getValue: (tx) => tx.pg_errorcode || 'Unknown' },
+        { name: 'PG Error Message', getValue: (tx) => tx.pg_errormessage || 'Unknown' },
+        { name: 'Failure Reason', getValue: (tx) => getFailureLabel(tx) || 'Unknown' },
       ];
     case 'NETBANKING':
       return [
         { name: 'PG', getValue: (tx) => tx.pg || 'Unknown' },
         { name: 'Bank', getValue: (tx) => tx.bankname || 'Unknown' },
-        { name: 'Failure Reason', getValue: (tx) => tx.txmsg || 'Unknown' },
+        { name: 'Failure Category', getValue: (tx) => getFailureCategory(tx) },
+        { name: 'CF Error Code', getValue: (tx) => tx.cf_errorcode || 'Unknown' },
+        { name: 'CF Error Source', getValue: (tx) => tx.cf_errorsource || 'Unknown' },
+        { name: 'CF Error Reason', getValue: (tx) => tx.cf_errorreason || 'Unknown' },
+        { name: 'CF Error Description', getValue: (tx) => tx.cf_errordescription || 'Unknown' },
+        { name: 'PG Error Code', getValue: (tx) => tx.pg_errorcode || 'Unknown' },
+        { name: 'PG Error Message', getValue: (tx) => tx.pg_errormessage || 'Unknown' },
+        { name: 'Failure Reason', getValue: (tx) => getFailureLabel(tx) || 'Unknown' },
       ];
     case 'ALL':
       return [
         { name: 'Payment Mode', getValue: (tx) => tx.paymentmode || 'Unknown' },
         { name: 'PG', getValue: (tx) => tx.pg || 'Unknown' },
-        { name: 'Failure Reason', getValue: (tx) => tx.txmsg || 'Unknown' },
+        { name: 'Failure Category', getValue: (tx) => getFailureCategory(tx) },
+        { name: 'CF Error Code', getValue: (tx) => tx.cf_errorcode || 'Unknown' },
+        { name: 'CF Error Source', getValue: (tx) => tx.cf_errorsource || 'Unknown' },
+        { name: 'CF Error Reason', getValue: (tx) => tx.cf_errorreason || 'Unknown' },
+        { name: 'CF Error Description', getValue: (tx) => tx.cf_errordescription || 'Unknown' },
+        { name: 'PG Error Code', getValue: (tx) => tx.pg_errorcode || 'Unknown' },
+        { name: 'PG Error Message', getValue: (tx) => tx.pg_errormessage || 'Unknown' },
+        { name: 'Failure Reason', getValue: (tx) => getFailureLabel(tx) || 'Unknown' },
+      ];
+    default:
+      return [];
+  }
+}
+
+// Dimensions for USER_DROPPED analysis (no error taxonomy)
+function getDimensionsForUserDropped(paymentMode: PaymentMode): DimensionConfig[] {
+  switch (paymentMode) {
+    case 'UPI':
+      return [
+        { name: 'PG', getValue: (tx) => tx.pg || 'Unknown' },
+        { name: 'Flow Type', getValue: (tx) => classifyUPIFlow(tx.bankname) },
+        { name: 'Handle', getValue: (tx) => extractUPIHandle(tx.cardmasked) || 'Unknown' },
+        { name: 'PSP', getValue: (tx) => tx.upi_psp || 'Unknown' },
+      ];
+    case 'CREDIT_CARD':
+    case 'DEBIT_CARD':
+    case 'PREPAID_CARD':
+      return [
+        { name: 'PG', getValue: (tx) => tx.pg || 'Unknown' },
+        { name: 'Card Type', getValue: (tx) => tx.cardtype || 'Unknown' },
+        { name: 'Card Scope', getValue: (tx) => classifyCardScope(tx.cardcountry) },
+        { name: 'Bank', getValue: (tx) => tx.bankname || 'Unknown' },
+        { name: 'Processing Card Type', getValue: (tx) => tx.processingcardtype || 'Unknown' },
+        { name: 'Native OTP Eligible', getValue: (tx) => tx.nativeotpurleligible || 'Unknown' },
+        { name: 'Frictionless', getValue: (tx) => tx.card_isfrictionless || 'Unknown' },
+      ];
+    case 'NETBANKING':
+      return [
+        { name: 'PG', getValue: (tx) => tx.pg || 'Unknown' },
+        { name: 'Bank', getValue: (tx) => tx.bankname || 'Unknown' },
+      ];
+    case 'ALL':
+      return [
+        { name: 'Payment Mode', getValue: (tx) => tx.paymentmode || 'Unknown' },
+        { name: 'PG', getValue: (tx) => tx.pg || 'Unknown' },
       ];
     default:
       return [];
@@ -150,7 +216,43 @@ function analyzeDimension(
   // Analyze each dimension value
   const allValues = new Set([...currentGroups.keys(), ...previousGroups.keys()]);
   
-  allValues.forEach((value) => {
+  // RCA Safety Guard: For large datasets, limit to top N categories by volume
+  // Collapse others into "OTHER" to prevent memory issues
+  const isLargeDataset = overallCurrentVolume > 500000 || overallPreviousVolume > 500000;
+  const MAX_CATEGORIES = 50; // Top 50 categories only
+  
+  let valuesToAnalyze: string[];
+  let otherCategoryData: { current: Transaction[]; previous: Transaction[] } | null = null;
+  
+  if (isLargeDataset && allValues.size > MAX_CATEGORIES) {
+    // Calculate volume for each category and sort
+    const categoryVolumes = Array.from(allValues).map(value => {
+      const currentVol = (currentGroups.get(value) || []).length;
+      const previousVol = (previousGroups.get(value) || []).length;
+      return { value, volume: Math.max(currentVol, previousVol) };
+    });
+    
+    // Sort by volume and take top N
+    categoryVolumes.sort((a, b) => b.volume - a.volume);
+    const topCategories = categoryVolumes.slice(0, MAX_CATEGORIES);
+    valuesToAnalyze = topCategories.map(c => c.value);
+    
+    // Collect remaining categories into "OTHER"
+    const otherValues = categoryVolumes.slice(MAX_CATEGORIES);
+    otherCategoryData = { current: [], previous: [] };
+    
+    otherValues.forEach(({ value }) => {
+      const currentTxs = currentGroups.get(value) || [];
+      const previousTxs = previousGroups.get(value) || [];
+      otherCategoryData!.current.push(...currentTxs);
+      otherCategoryData!.previous.push(...previousTxs);
+    });
+  } else {
+    valuesToAnalyze = Array.from(allValues);
+  }
+  
+  // Analyze top categories
+  valuesToAnalyze.forEach((value) => {
     const currentTxs = currentGroups.get(value) || [];
     const previousTxs = previousGroups.get(value) || [];
 
@@ -265,7 +367,7 @@ function analyzeDimension(
     if (dimension.name !== 'Failure Reason' && currentTxs.length > 0) {
       const failureReasonCounts = new Map<string, number>();
       currentTxs.forEach((tx) => {
-        const reason = tx.txmsg || 'Unknown';
+        const reason = getFailureLabel(tx) || 'Unknown';
         failureReasonCounts.set(reason, (failureReasonCounts.get(reason) || 0) + 1);
       });
       
@@ -302,6 +404,56 @@ function analyzeDimension(
       topFailureReasonCount,
     });
   });
+  
+  // Add "OTHER" category if we collapsed some categories
+  if (
+    otherCategoryData &&
+    (otherCategoryData.current.length > 0 || (otherCategoryData.previous?.length ?? 0) > 0)
+  ) {
+    const currentTxs = otherCategoryData.current;
+    const previousTxs = otherCategoryData.previous ?? [];
+    const currentFailureCount = currentTxs.length;
+    const previousFailureCount = previousTxs.length;
+    
+    const failureShareCurrent = totalCurrentFailures > 0 
+      ? (currentFailureCount / totalCurrentFailures) * 100 
+      : 0;
+    const failureSharePrevious = totalPreviousFailures > 0 
+      ? (previousFailureCount / totalPreviousFailures) * 100 
+      : 0;
+    const volumeShareCurrent = overallCurrentVolume > 0 
+      ? (currentFailureCount / overallCurrentVolume) * 100 
+      : 0;
+    const volumeSharePrevious = overallPreviousVolume > 0 
+      ? (previousFailureCount / overallPreviousVolume) * 100 
+      : 0;
+    
+    const estimatedCurrentSR = overallCurrentVolume > 0
+      ? calculateSR(overallCurrentVolume - currentFailureCount, overallCurrentVolume)
+      : overallCurrentSR;
+    const estimatedPreviousSR = overallPreviousVolume > 0
+      ? calculateSR(overallPreviousVolume - previousFailureCount, overallPreviousVolume)
+      : overallPreviousSR;
+    
+    analyses.push({
+      dimension: dimension.name,
+      dimensionValue: 'OTHER',
+      currentVolume: currentFailureCount,
+      previousVolume: previousFailureCount,
+      volumeDelta: volumeShareCurrent - volumeSharePrevious,
+      volumeShareCurrent,
+      volumeSharePrevious,
+      currentSR: estimatedCurrentSR,
+      previousSR: estimatedPreviousSR,
+      srDelta: estimatedCurrentSR - estimatedPreviousSR,
+      flagged: false,
+      flagReason: null,
+      counterfactualSR: undefined,
+      impactOnOverallSR: undefined,
+      topFailureReason: undefined,
+      topFailureReasonCount: undefined,
+    });
+  }
 
   return analyses;
 }
@@ -432,7 +584,7 @@ function generateInsights(
     // Get top failure reasons for this PG
     const failureReasonCounts = new Map<string, number>();
     pgTransactions.forEach((tx) => {
-      const reason = tx.txmsg || 'Unknown';
+      const reason = getFailureLabel(tx) || 'Unknown';
       failureReasonCounts.set(reason, (failureReasonCounts.get(reason) || 0) + 1);
     });
     
@@ -480,6 +632,43 @@ function generateInsights(
   return insights.slice(0, 10); // Top 10 insights (focused, less repetitive)
 }
 
+export function computeUserDroppedAnalysis(
+  currentPeriod: Transaction[],
+  previousPeriod: Transaction[],
+  paymentMode: PaymentMode = 'ALL'
+): { dimensionAnalyses: DimensionAnalysis[] } {
+  // Filter by payment mode
+  const currentFiltered = filterByPaymentMode(currentPeriod, paymentMode);
+  const previousFiltered = filterByPaymentMode(previousPeriod, paymentMode);
+
+  // Filter to ONLY USER_DROPPED transactions
+  const currentUserDropped = currentFiltered.filter((tx) => tx.isUserDropped);
+  const previousUserDropped = previousFiltered.filter((tx) => tx.isUserDropped);
+
+  // Calculate overall metrics for context
+  const current = computeMetrics(currentFiltered);
+  const previous = computeMetrics(previousFiltered);
+
+  // Get dimensions for USER_DROPPED analysis (no error taxonomy)
+  const dimensions = getDimensionsForUserDropped(paymentMode);
+  const dimensionAnalyses: DimensionAnalysis[] = [];
+
+  dimensions.forEach((dimension) => {
+    const analyses = analyzeDimension(
+      dimension,
+      currentUserDropped, // Only USER_DROPPED transactions
+      previousUserDropped, // Only USER_DROPPED transactions
+      current.sr,
+      previous.sr,
+      current.totalCount, // Total volume for context
+      previous.totalCount // Total volume for context
+    );
+    dimensionAnalyses.push(...analyses);
+  });
+
+  return { dimensionAnalyses };
+}
+
 export function computePeriodComparison(
   currentPeriod: Transaction[],
   previousPeriod: Transaction[],
@@ -493,9 +682,10 @@ export function computePeriodComparison(
   const current = computeMetrics(currentFiltered);
   const previous = computeMetrics(previousFiltered);
 
-  // Filter to ONLY failure transactions for RCA analysis (txstatus !== 'SUCCESS')
-  const currentFailures = currentFiltered.filter((tx) => tx.txstatus !== 'SUCCESS');
-  const previousFailures = previousFiltered.filter((tx) => tx.txstatus !== 'SUCCESS');
+  // Filter to ONLY technical failures for RCA analysis (excludes USER_DROPPED, INIT_FAILED)
+  // USER_DROPPED has no error taxonomy, so it skews dimension analysis
+  const currentFailures = currentFiltered.filter((tx) => tx.isFailed);
+  const previousFailures = previousFiltered.filter((tx) => tx.isFailed);
 
   const srDelta = current.sr - previous.sr;
   const volumeDelta = previous.totalCount > 0
