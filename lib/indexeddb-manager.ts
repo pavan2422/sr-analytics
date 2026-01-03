@@ -12,6 +12,11 @@ interface DBManager {
   clear(): Promise<void>;
   getCount(): Promise<number>;
   addTransactions(transactions: Transaction[]): Promise<void>;
+  /**
+   * Returns distinct values for a given index (e.g. 'merchantid', 'paymentmode').
+   * Uses an IndexedDB key cursor so it does NOT load all transactions into memory.
+   */
+  getDistinctIndexValues(indexName: string): Promise<string[]>;
   streamTransactions(
     onChunk: (chunk: Transaction[]) => Promise<void>,
     chunkSize?: number,
@@ -165,6 +170,41 @@ class IndexedDBTransactionManager implements DBManager {
 
       request.onerror = () => reject(request.error);
       request.onsuccess = () => resolve(request.result);
+    });
+  }
+
+  async getDistinctIndexValues(indexName: string): Promise<string[]> {
+    await this.init();
+    if (!this.db) throw new Error('Database not initialized');
+
+    return new Promise((resolve, reject) => {
+      try {
+        const tx = this.db!.transaction([STORE_NAME], 'readonly');
+        const store = tx.objectStore(STORE_NAME);
+        const index = store.index(indexName);
+
+        const values: string[] = [];
+        const req = index.openKeyCursor();
+
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const cursor = req.result as IDBCursor | null;
+          if (!cursor) {
+            resolve(values);
+            return;
+          }
+
+          const rawKey = cursor.key;
+          const v = String(rawKey ?? '').trim();
+          if (v) values.push(v);
+
+          cursor.continue();
+        };
+
+        tx.onerror = () => reject(tx.error);
+      } catch (e: any) {
+        reject(new Error(e?.message || 'Failed to read distinct index values'));
+      }
     });
   }
 

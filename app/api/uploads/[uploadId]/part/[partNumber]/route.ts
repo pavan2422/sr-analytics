@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { prisma } from '@/lib/prisma';
 import { ensureUploadDirs, ensureUploadSessionTmpDir, getPartPath } from '@/lib/server/storage';
 
 export const runtime = 'nodejs';
@@ -10,6 +9,7 @@ export const dynamic = 'force-dynamic';
 
 export async function PUT(req: Request, ctx: { params: Promise<{ uploadId: string; partNumber: string }> }) {
   const { uploadId, partNumber: partNumberStr } = await ctx.params;
+  const { prisma } = await import('@/lib/prisma');
   const partNumber = Number(partNumberStr);
   if (!Number.isFinite(partNumber) || partNumber < 1) {
     return NextResponse.json({ error: 'Invalid partNumber' }, { status: 400 });

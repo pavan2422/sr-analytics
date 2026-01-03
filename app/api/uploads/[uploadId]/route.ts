@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
-import { prisma } from '@/lib/prisma';
 import { getUploadSessionTmpDir, listReceivedParts } from '@/lib/server/storage';
 
 export const runtime = 'nodejs';
@@ -8,6 +7,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(_req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
   const { uploadId } = await ctx.params;
+  const { prisma } = await import('@/lib/prisma');
   const session = await prisma.uploadSession.findUnique({
     where: { id: uploadId },
     include: { storedFile: true },
@@ -46,6 +46,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ uploadId: stri
 
 export async function DELETE(_req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
   const { uploadId } = await ctx.params;
+  const { prisma } = await import('@/lib/prisma');
   const session = await prisma.uploadSession.findUnique({ where: { id: uploadId } });
   if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
 

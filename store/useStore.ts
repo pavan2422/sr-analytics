@@ -58,6 +58,7 @@ interface StoreState {
     banks?: string[];
     cardTypes?: string[];
   }>) => Promise<Transaction[]>;
+  getIndexedDBFilterOptions: () => Promise<{ paymentModes: string[]; merchantIds: string[] }>;
   getFilteredTimeBounds: () => Promise<{ min?: Date; max?: Date }>;
   
   // Computed selectors (memoized in components)
@@ -472,6 +473,18 @@ export const useStore = create<StoreState>()(
     });
   },
 
+      getIndexedDBFilterOptions: async () => {
+        await dbManager.init();
+        const [paymentModes, merchantIds] = await Promise.all([
+          dbManager.getDistinctIndexValues('paymentmode'),
+          dbManager.getDistinctIndexValues('merchantid'),
+        ]);
+        return {
+          paymentModes: paymentModes.filter(Boolean).sort(),
+          merchantIds: merchantIds.map((v) => String(v || '').trim()).filter(Boolean).sort(),
+        };
+      },
+
   getFilteredTimeBounds: async () => {
     const { filters } = get();
     await dbManager.init();
@@ -503,17 +516,14 @@ export const useStore = create<StoreState>()(
 
       const fileExtension = file.name.split('.').pop()?.toLowerCase();
 
-      // Backend upload path: avoid browser memory + IndexedDB limits for large files.
-      // This is the safest path for ~50MB–4GB files (especially on lower-RAM machines).
-      //
-      // Note: backend sampling currently supports CSV only.
-      const backendUploadThresholdBytes = 50 * 1024 * 1024; // 50MB
-      const shouldUseBackendUpload = fileExtension === 'csv' && file.size >= backendUploadThresholdBytes;
-
       // Ultra-large files (e.g., 3GB) will exceed browser memory/quota if fully ingested.
       // Use a bounded sample mode instead to avoid crashes.
       const ultraLargeThresholdBytes = 1500 * 1024 * 1024; // 1.5GB
       const isUltraLarge = file.size >= ultraLargeThresholdBytes;
+
+      // Backend upload path: use ONLY for ultra-large CSVs. For smaller files, prefer browser IndexedDB
+      // so filters/charts can reflect the full dataset.
+      const shouldUseBackendUpload = fileExtension === 'csv' && isUltraLarge;
       
       // For files > 100MB, use IndexedDB streaming mode
       const useIndexedDBMode = !isUltraLarge && (file.size > 100 * 1024 * 1024 || fileSizeMB > 100);

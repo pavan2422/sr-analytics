@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
 import csvParser from 'csv-parser';
-import { prisma } from '@/lib/prisma';
 import { normalizeData } from '@/lib/data-normalization';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
 
@@ -10,6 +9,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
   const { uploadId } = await ctx.params;
+  const { prisma } = await import('@/lib/prisma');
 
   const url = new URL(req.url);
   const maxRows = Math.min(Math.max(Number(url.searchParams.get('maxRows') || 100000), 1), 200000);

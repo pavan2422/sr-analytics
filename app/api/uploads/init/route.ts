@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import crypto from 'node:crypto';
-import { prisma } from '@/lib/prisma';
 import { ensureUploadDirs, ensureUploadSessionTmpDir } from '@/lib/server/storage';
 
 export const runtime = 'nodejs';
@@ -14,6 +13,7 @@ type InitBody = {
 };
 
 export async function POST(req: Request) {
+  const { prisma } = await import('@/lib/prisma');
   const body = (await req.json().catch(() => null)) as InitBody | null;
   if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
 

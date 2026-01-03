@@ -4,7 +4,6 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
-import { prisma } from '@/lib/prisma';
 import {
   buildStoredFileRelativePath,
   ensureUploadDirs,
@@ -24,6 +23,7 @@ type CompleteBody = {
 
 export async function POST(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
   const { uploadId } = await ctx.params;
+  const { prisma } = await import('@/lib/prisma');
   const session = await prisma.uploadSession.findUnique({ where: { id: uploadId } });
   if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
   if (session.status === 'completed') {
