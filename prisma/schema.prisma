@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  // Local dev default. For production, switch to Postgres and use env("DATABASE_URL").
+  url      = "file:./dev.db"
+}
+
+model StoredFile {
+  id             String   @id @default(cuid())
+  originalName   String
+  storedName     String
+  contentType    String?
+  sizeBytes      BigInt
+  sha256Hex      String?  // computed at finalize-time (optional)
+  storageBackend String   // "local_disk" for now; later "s3", "r2", etc.
+  storagePath    String   // relative path on disk or object key
+  createdAt      DateTime @default(now())
+  uploads        UploadSession[]
+  analysis       StoredFileAnalysis?
+
+  @@index([createdAt])
+}
+
+model StoredFileAnalysis {
+  id            String   @id @default(cuid())
+  status        String   // "queued" | "running" | "completed" | "failed"
+  processedRows Int      @default(0)
+  totalRows     Int?
+  resultJson    String?  // JSON stored as string for SQLite compatibility
+  error         String?
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime @default(now())
+
+  storedFileId  String   @unique
+  storedFile    StoredFile @relation(fields: [storedFileId], references: [id])
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model UploadSession {
+  id             String   @id
+  status         String   // "initiated" | "uploading" | "completed" | "failed"
+  originalName   String
+  contentType    String?
+  sizeBytes      BigInt
+  chunkSizeBytes Int
+  receivedBytes  BigInt   @default(0)
+  createdAt      DateTime @default(now())
+  completedAt    DateTime?
+
+  storedFileId   String?
+  storedFile     StoredFile? @relation(fields: [storedFileId], references: [id])
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+

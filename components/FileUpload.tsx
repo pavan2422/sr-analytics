@@ -76,6 +76,7 @@ export function FileUpload() {
         <div className="text-center w-full max-w-md">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
           <p className="text-muted-foreground mb-4">
+            {progress?.stage === 'uploading' && 'Uploading file to backend...'}
             {progress?.stage === 'reading' && 'Reading file...'}
             {progress?.stage === 'parsing' && 'Parsing file...'}
             {progress?.stage === 'normalizing' && 'Normalizing data...'}
@@ -85,6 +86,7 @@ export function FileUpload() {
             <div className="w-full">
               <div className="flex justify-between text-sm text-muted-foreground mb-2">
                 <span>
+                  {progress.stage === 'uploading' && 'Uploading'}
                   {progress.stage === 'reading' && 'Reading'}
                   {progress.stage === 'parsing' && 'Parsing'}
                   {progress.stage === 'normalizing' && 'Normalizing'}

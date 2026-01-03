@@ -7,6 +7,7 @@ import { indexedDBStorage } from './indexedDBStorage';
 import { streamCSVFile, processExcelFile, ProcessingProgress } from '@/lib/file-processor';
 import { WorkerManager } from '@/lib/worker-manager';
 import { dbManager } from '@/lib/indexeddb-manager';
+import { uploadFileInChunks } from '@/lib/upload-client';
 
 interface StoreState {
   // Raw data metadata (not full transactions for large files)
@@ -18,6 +19,8 @@ interface StoreState {
   fileSizes: number[];
   isSampledDataset: boolean; // True when we sampled a huge file instead of ingesting everything
   sampledFromBytes: number; // Original file size when sampling
+  backendUploadId: string | null; // When using backend upload (multi-GB safe)
+  backendStoredFileId: string | null; // StoredFile.id in Prisma (metadata + path)
   _skipPersistence: boolean; // Internal flag to skip persistence during large loads
   _useIndexedDB: boolean; // Flag to use IndexedDB instead of memory
   progress: ProcessingProgress | null; // Progress tracking for large files
@@ -74,6 +77,16 @@ const defaultFilters: FilterState = {
 
 // Worker manager instances (shared across store)
 const workerManager = new WorkerManager();
+
+async function fetchBackendSample(uploadId: string, maxRows: number) {
+  const res = await fetch(`/api/uploads/${uploadId}/sample?maxRows=${maxRows}`);
+  if (!res.ok) {
+    const msg = await res.text().catch(() => '');
+    throw new Error(`Failed to fetch sample from backend (${res.status}): ${msg}`);
+  }
+  const json = (await res.json()) as { transactions: Transaction[]; storedFileId: string };
+  return json;
+}
 
 // Stream a HUGE CSV but stop after a fixed number of rows (sample mode).
 async function streamCSVSampleToMemory(
@@ -400,6 +413,8 @@ export const useStore = create<StoreState>()(
   fileSizes: [],
   isSampledDataset: false,
   sampledFromBytes: 0,
+  backendUploadId: null,
+  backendStoredFileId: null,
   _skipPersistence: false,
   _useIndexedDB: false,
   progress: null,
@@ -486,6 +501,15 @@ export const useStore = create<StoreState>()(
       const fileSizeMB = file.size / 1024 / 1024;
       console.log('Loading file:', file.name, 'Size:', fileSizeMB.toFixed(2), 'MB');
 
+      const fileExtension = file.name.split('.').pop()?.toLowerCase();
+
+      // Backend upload path: avoid browser memory + IndexedDB limits for large files.
+      // This is the safest path for ~50MB–4GB files (especially on lower-RAM machines).
+      //
+      // Note: backend sampling currently supports CSV only.
+      const backendUploadThresholdBytes = 50 * 1024 * 1024; // 50MB
+      const shouldUseBackendUpload = fileExtension === 'csv' && file.size >= backendUploadThresholdBytes;
+
       // Ultra-large files (e.g., 3GB) will exceed browser memory/quota if fully ingested.
       // Use a bounded sample mode instead to avoid crashes.
       const ultraLargeThresholdBytes = 1500 * 1024 * 1024; // 1.5GB
@@ -493,19 +517,75 @@ export const useStore = create<StoreState>()(
       
       // For files > 100MB, use IndexedDB streaming mode
       const useIndexedDBMode = !isUltraLarge && (file.size > 100 * 1024 * 1024 || fileSizeMB > 100);
-      
-      const fileExtension = file.name.split('.').pop()?.toLowerCase();
       let totalRows = 0;
       
       const progressCallback = (progress: ProcessingProgress) => {
         set({ progress });
       };
 
+      if (shouldUseBackendUpload) {
+        // For big files, upload to backend storage and work off a sampled dataset in the UI.
+        // This prevents tab crashes and IndexedDB quota issues.
+        const maxSampleRows = 100000;
+        set({
+          _useIndexedDB: false,
+          _skipPersistence: true,
+          isSampledDataset: true,
+          sampledFromBytes: file.size,
+          backendUploadId: null,
+          backendStoredFileId: null,
+        });
+
+        // For now, backend sampling expects CSV. (XLSX cannot be streamed safely in Node without full load.)
+        if (fileExtension !== 'csv') {
+          throw new Error('Large files must be uploaded as CSV for safe streaming. Please export as CSV and try again.');
+        }
+
+        // Try to resume an existing partial upload if we have one persisted and it matches the file.
+        const { fileNames, fileSizes, backendUploadId } = get();
+        const canResume =
+          Boolean(backendUploadId) &&
+          fileNames?.[0] === file.name &&
+          fileSizes?.[0] === file.size;
+
+        const { uploadId, storedFileId } = await uploadFileInChunks(file, progressCallback, {
+          // Slightly smaller chunks reduce risk of proxy/proxy timeouts.
+          chunkSizeBytes: 16 * 1024 * 1024,
+          uploadId: canResume ? backendUploadId! : undefined,
+          onUploadId: (id) => {
+            // Persist early so a refresh/crash can resume.
+            set({ backendUploadId: id, fileNames: [file.name], fileSizes: [file.size] });
+          },
+          cleanupOnError: false,
+        });
+
+        // Kick off a backend-side full-file analysis in the background (best-effort).
+        // The UI can continue instantly on a bounded sample while analysis runs.
+        void fetch(`/api/uploads/${uploadId}/analysis`, { method: 'POST' }).catch(() => {});
+
+        // Pull a bounded sample from the stored file so analytics still works instantly.
+        const sample = await fetchBackendSample(uploadId, maxSampleRows);
+
+        set({
+          rawTransactions: sample.transactions,
+          transactionCount: sample.transactions.length,
+          fileNames: [file.name],
+          fileSizes: [file.size],
+          backendUploadId: uploadId,
+          backendStoredFileId: storedFileId || sample.storedFileId,
+          progress: { processed: sample.transactions.length, total: sample.transactions.length, percentage: 100, stage: 'complete' },
+          _skipPersistence: false,
+        });
+
+        await get().applyFilters();
+        return;
+      }
+
       if (isUltraLarge) {
         // Sample first N rows into memory, compute metrics from sample.
         const maxSampleRows = 100000; // 100k rows keeps memory + persistence manageable
         console.log('Ultra-large file detected. Using sample mode:', maxSampleRows, 'rows');
-        set({ _useIndexedDB: false, _skipPersistence: true, isSampledDataset: true, sampledFromBytes: file.size });
+        set({ _useIndexedDB: false, _skipPersistence: true, isSampledDataset: true, sampledFromBytes: file.size, backendUploadId: null, backendStoredFileId: null });
 
         if (fileExtension !== 'csv') {
           throw new Error('Very large files must be uploaded as CSV. Please export as CSV and try again.');
@@ -533,7 +613,7 @@ export const useStore = create<StoreState>()(
       // Process and stream directly to IndexedDB for large files
       if (useIndexedDBMode) {
         console.log('Using IndexedDB streaming mode for large file');
-        set({ _useIndexedDB: true, _skipPersistence: true, isSampledDataset: false, sampledFromBytes: 0 });
+        set({ _useIndexedDB: true, _skipPersistence: true, isSampledDataset: false, sampledFromBytes: 0, backendUploadId: null, backendStoredFileId: null });
         
         if (fileExtension === 'csv') {
           // Stream CSV and write directly to IndexedDB
@@ -551,7 +631,7 @@ export const useStore = create<StoreState>()(
         }
       } else {
         // Small file mode - load into memory
-        set({ _useIndexedDB: false, isSampledDataset: false, sampledFromBytes: 0 });
+        set({ _useIndexedDB: false, isSampledDataset: false, sampledFromBytes: 0, backendUploadId: null, backendStoredFileId: null });
         let rawData: any[] = [];
         
         if (fileExtension === 'csv') {
@@ -931,6 +1011,8 @@ export const useStore = create<StoreState>()(
       fileSizes: [],
       isSampledDataset: false,
       sampledFromBytes: 0,
+      backendUploadId: null,
+      backendStoredFileId: null,
       error: null,
       progress: null,
       filters: defaultFilters,
@@ -955,6 +1037,8 @@ export const useStore = create<StoreState>()(
             fileSizes: state.fileSizes,
             _useIndexedDB: state._useIndexedDB,
             transactionCount: state.transactionCount,
+            backendUploadId: state.backendUploadId,
+            backendStoredFileId: state.backendStoredFileId,
           };
         }
         return {
@@ -963,6 +1047,8 @@ export const useStore = create<StoreState>()(
           fileSizes: state.fileSizes,
           _useIndexedDB: state._useIndexedDB,
           transactionCount: state.transactionCount,
+          backendUploadId: state.backendUploadId,
+          backendStoredFileId: state.backendStoredFileId,
         };
       },
       merge: (persistedState: any, currentState: StoreState) => {
@@ -979,6 +1065,8 @@ export const useStore = create<StoreState>()(
             // Preserve IndexedDB flags if present
             _useIndexedDB: persistedState._useIndexedDB ?? currentState._useIndexedDB,
             transactionCount: persistedState.transactionCount ?? currentState.transactionCount,
+            backendUploadId: persistedState.backendUploadId ?? currentState.backendUploadId,
+            backendStoredFileId: persistedState.backendStoredFileId ?? currentState.backendStoredFileId,
           };
         }
         // For IndexedDB mode (no rawTransactions but has fileNames)
@@ -989,6 +1077,8 @@ export const useStore = create<StoreState>()(
             // Preserve IndexedDB flags if present
             _useIndexedDB: persistedState._useIndexedDB ?? currentState._useIndexedDB,
             transactionCount: persistedState.transactionCount ?? currentState.transactionCount,
+            backendUploadId: persistedState.backendUploadId ?? currentState.backendUploadId,
+            backendStoredFileId: persistedState.backendStoredFileId ?? currentState.backendStoredFileId,
           };
         }
         return { ...currentState, ...persistedState };

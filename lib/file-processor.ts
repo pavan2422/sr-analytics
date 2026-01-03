@@ -7,7 +7,7 @@ export interface ProcessingProgress {
   processed: number;
   total: number;
   percentage: number;
-  stage: 'reading' | 'parsing' | 'normalizing' | 'complete';
+  stage: 'reading' | 'uploading' | 'parsing' | 'normalizing' | 'complete';
   error?: string;
 }
 

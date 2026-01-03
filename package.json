@@ -3,47 +3,46 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "clean": "rm -rf .next .next-dev",
-    "clean:dev": "rm -rf .next-dev",
-    "clean:build": "rm -rf .next",
+    "clean": "rimraf .next .next-dev",
+    "clean:dev": "rimraf .next-dev",
+    "clean:build": "rimraf .next",
     "dev": "npm run clean:dev && next dev",
     "build": "npm run clean:build && next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "next": "^14.2.5",
-    "zustand": "^4.5.2",
-    "echarts": "^5.5.0",
-    "echarts-for-react": "^3.0.2",
+    "@prisma/client": "^5.22.0",
     "@tanstack/react-table": "^8.16.0",
     "@tanstack/react-virtual": "^3.0.1",
-    "papaparse": "^5.4.1",
-    "xlsx": "^0.18.5",
-    "date-fns": "^3.6.0",
     "clsx": "^2.1.1",
-    "tailwind-merge": "^2.4.0"
+    "csv-parser": "^3.2.0",
+    "date-fns": "^3.6.0",
+    "echarts": "^5.5.0",
+    "echarts-for-react": "^3.0.2",
+    "next": "^14.2.5",
+    "papaparse": "^5.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.4.0",
+    "xlsx": "^0.18.5",
+    "zustand": "^4.5.2"
   },
   "devDependencies": {
-    "typescript": "^5.5.4",
     "@types/node": "^20.14.12",
+    "@types/papaparse": "^5.3.14",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
-    "@types/papaparse": "^5.3.14",
-    "tailwindcss": "^3.4.7",
-    "postcss": "^8.4.40",
     "autoprefixer": "^10.4.20",
     "eslint": "^8.57.0",
-    "eslint-config-next": "^14.2.5"
+    "eslint-config-next": "^14.2.5",
+    "postcss": "^8.4.40",
+    "prisma": "^5.22.0",
+    "rimraf": "^6.1.2",
+    "tailwindcss": "^3.4.7",
+    "typescript": "^5.5.4"
   }
 }
-
-
-
-
-
-
-
-
