@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
-import { startStoredFileAnalysis } from '@/lib/server/stored-file-analysis';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -28,9 +27,16 @@ export async function GET(_req: Request, ctx: { params: Promise<{ uploadId: stri
       startedAt: analysis.startedAt,
       completedAt: analysis.completedAt,
       error: analysis.error,
-      resultJson: analysis.status === 'completed' && analysis.resultJson 
-        ? JSON.parse(analysis.resultJson) 
-        : null,
+      resultJson:
+        analysis.status === 'completed' && analysis.resultJson
+          ? (() => {
+              try {
+                return JSON.parse(analysis.resultJson);
+              } catch {
+                return null;
+              }
+            })()
+          : null,
     },
     { status: 200 }
   );
@@ -48,6 +54,8 @@ export async function POST(_req: Request, ctx: { params: Promise<{ uploadId: str
     return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
   }
 
+  // Lazy import to keep the route module light during build-time evaluation on Vercel.
+  const { startStoredFileAnalysis } = await import('@/lib/server/stored-file-analysis');
   const started = await startStoredFileAnalysis(session.storedFileId);
   return NextResponse.json({ ok: true, ...started }, { status: 200 });
 }
