@@ -44,7 +44,7 @@ export async function uploadFileInChunks(
 
   // Resume or init
   let uploadId = opts?.uploadId?.trim() || '';
-  let expectedParts: number;
+  let expectedParts: number | null = null;
   let receivedParts = new Set<number>();
   let alreadyUploadedBytes = 0;
 
@@ -87,6 +87,10 @@ export async function uploadFileInChunks(
     receivedParts = new Set<number>();
     alreadyUploadedBytes = 0;
     opts?.onUploadId?.(uploadId);
+  }
+
+  if (!expectedParts || !Number.isFinite(expectedParts) || expectedParts < 1) {
+    throw new Error('Upload init failed: expectedParts is invalid.');
   }
 
   let uploaded = Math.max(0, alreadyUploadedBytes);
