@@ -718,12 +718,53 @@ export const useStore = create<StoreState>()(
           _skipPersistence: false,
         });
 
-        await get().applyFilters();
+        // Wait for upload session to be fully completed before fetching metrics
+        // This prevents 404 errors due to race conditions on serverless platforms
+        let sessionReady = false;
+        let retries = 0;
+        const maxRetries = 10;
+        while (!sessionReady && retries < maxRetries) {
+          try {
+            const sessionRes = await fetch(`/api/uploads/${uploadId}`);
+            if (sessionRes.ok) {
+              const sessionData = await sessionRes.json();
+              if (sessionData.status === 'completed' && sessionData.storedFileId) {
+                sessionReady = true;
+                break;
+              }
+            }
+          } catch {
+            // Continue retrying
+          }
+          retries++;
+          if (!sessionReady) {
+            await new Promise(resolve => setTimeout(resolve, 500 * retries)); // Exponential backoff
+          }
+        }
+
+        if (sessionReady) {
+          await get().applyFilters();
+        } else {
+          // If session not ready after retries, still try to apply filters but with error handling
+          try {
+            await get().applyFilters();
+          } catch (error: any) {
+            console.warn('Failed to apply filters immediately after upload, will retry:', error);
+            // Retry after a delay
+            setTimeout(() => {
+              get().applyFilters().catch((e) => {
+                console.error('Error applying filters after retry:', e);
+              });
+            }, 2000);
+          }
+        }
 
         // Best-effort: update full-file metrics in the background (so totals are accurate).
         // This may take time for multi-GB files; we keep the UI responsive.
         void (async () => {
           try {
+            // Wait a bit more to ensure session is fully committed
+            await new Promise(resolve => setTimeout(resolve, 1000));
             const eff = {
               startDate: get().filters.dateRange.start || undefined,
               endDate: get().filters.dateRange.end || undefined,
@@ -740,8 +781,31 @@ export const useStore = create<StoreState>()(
               globalMetrics: m.globalMetrics,
               dailyTrends: m.dailyTrends,
             });
-          } catch {
-            // ignore
+          } catch (error: any) {
+            console.warn('Failed to fetch backend metrics in background:', error);
+            // Retry once more after a delay
+            setTimeout(async () => {
+              try {
+                const eff = {
+                  startDate: get().filters.dateRange.start || undefined,
+                  endDate: get().filters.dateRange.end || undefined,
+                  paymentModes: get().filters.paymentModes.length > 0 ? get().filters.paymentModes : undefined,
+                  merchantIds: get().filters.merchantIds.length > 0 ? get().filters.merchantIds : undefined,
+                  pgs: get().filters.pgs.length > 0 ? get().filters.pgs : undefined,
+                  banks: get().filters.banks.length > 0 ? get().filters.banks : undefined,
+                  cardTypes: get().filters.cardTypes.length > 0 ? get().filters.cardTypes : undefined,
+                };
+                const m = await fetchBackendMetrics(uploadId, eff);
+                set({
+                  transactionCount: m.filteredTransactionCount,
+                  filteredTransactionCount: m.filteredTransactionCount,
+                  globalMetrics: m.globalMetrics,
+                  dailyTrends: m.dailyTrends,
+                });
+              } catch {
+                // Ignore final failure
+              }
+            }, 3000);
           }
         })();
         return;
@@ -933,14 +997,32 @@ export const useStore = create<StoreState>()(
 
       if (_useBackend) {
         if (!backendUploadId) throw new Error('Missing backend upload id');
-        const m = await fetchBackendMetrics(backendUploadId, effFilters);
-        set({
-          filteredTransactionCount: m.filteredTransactionCount,
-          globalMetrics: m.globalMetrics,
-          dailyTrends: m.dailyTrends,
-          analysisStage: null,
-        });
-        return;
+        
+        // Retry logic for serverless cold starts or database write delays
+        let lastError: Error | null = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const m = await fetchBackendMetrics(backendUploadId, effFilters);
+            set({
+              filteredTransactionCount: m.filteredTransactionCount,
+              globalMetrics: m.globalMetrics,
+              dailyTrends: m.dailyTrends,
+              analysisStage: null,
+            });
+            return;
+          } catch (error: any) {
+            lastError = error;
+            const is404 = error.message?.includes('404') || error.message?.includes('not found');
+            if (is404 && attempt < 2) {
+              // Wait with exponential backoff before retrying
+              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+              continue;
+            }
+            // If not 404 or last attempt, throw the error
+            throw error;
+          }
+        }
+        throw lastError || new Error('Failed to fetch backend metrics after retries');
       }
 
       await dbManager.init();
