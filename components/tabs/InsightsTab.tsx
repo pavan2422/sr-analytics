@@ -12,8 +12,10 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 export function InsightsTab() {
   const filteredTransactions = useStore((state) => state.filteredTransactions);
   const useIndexedDB = useStore((state) => state._useIndexedDB);
+  const useBackend = useStore((state) => state._useBackend);
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const streamFilteredTransactions = useStore((state) => state.streamFilteredTransactions);
+  const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
   const [sortColumn, setSortColumn] = useState<keyof FailureInsight>('impactScore');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [filterPaymentMode, setFilterPaymentMode] = useState<string>('ALL');
@@ -35,6 +37,17 @@ export function InsightsTab() {
     const timeoutId = setTimeout(async () => {
       try {
         if (useIndexedDB) {
+          // Backend mode: full transaction streaming is not available in the browser.
+          // Generate insights from a bounded filtered sample instead.
+          if (useBackend) {
+            const sample = await getSampleFilteredTransactions(50000);
+            const generated = await generateFailureInsights(sample, 25000);
+            setInsights(generated);
+            setCurrentPage(1);
+            setIsGeneratingInsights(false);
+            return;
+          }
+
           // For large datasets (5GB+), stream and process in batches - DON'T accumulate all
           console.log(`Streaming ${filteredTransactionCount} transactions from IndexedDB for insights...`);
           
@@ -105,7 +118,14 @@ export function InsightsTab() {
     }, 500); // Longer debounce for large files (5GB+)
 
     return () => clearTimeout(timeoutId);
-  }, [filteredTransactions, useIndexedDB, filteredTransactionCount, streamFilteredTransactions]);
+  }, [
+    filteredTransactions,
+    useIndexedDB,
+    useBackend,
+    filteredTransactionCount,
+    streamFilteredTransactions,
+    getSampleFilteredTransactions,
+  ]);
 
   // Get unique payment modes for filter
   const paymentModes = useMemo(() => {
@@ -235,8 +255,11 @@ export function InsightsTab() {
           <p className="text-muted-foreground">
             Generating insights from {(useIndexedDB ? filteredTransactionCount : filteredTransactions.length).toLocaleString()} transactions...
           </p>
-          {useIndexedDB && (
+          {useIndexedDB && !useBackend && (
             <p className="text-xs text-muted-foreground mt-2">Streaming from IndexedDB (this may take a few minutes for large files)</p>
+          )}
+          {useIndexedDB && useBackend && (
+            <p className="text-xs text-muted-foreground mt-2">Using a bounded filtered sample for insights (memory-safe)</p>
           )}
         </div>
       </div>
@@ -273,6 +296,15 @@ export function InsightsTab() {
             <span className="text-sm text-muted-foreground">Auto-Generated</span>
           </div>
         </div>
+
+        {useBackend && (
+          <div className="mt-4 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+            <p className="text-sm text-yellow-800 dark:text-yellow-200">
+              Insights are generated from a bounded filtered sample (up to 50,000 transactions) for large backend uploads.
+              Some rare issues may not appear. Use filters to zoom in on the segment you care about.
+            </p>
+          </div>
+        )}
 
         {/* Summary KPIs */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
