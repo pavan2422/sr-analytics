@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/prisma';
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -69,6 +70,21 @@ export async function ensureDatabaseReady(): Promise<void> {
 
   global.__srDbReadyPromise = (async () => {
     try {
+      // Ensure the database directory exists (for SQLite file:./dev.db)
+      const dbPath = path.join(process.cwd(), 'prisma', 'dev.db');
+      const dbDir = path.dirname(dbPath);
+      try {
+        fs.mkdirSync(dbDir, { recursive: true });
+      } catch (e: any) {
+        // Ignore if directory already exists
+        if (e?.code !== 'EEXIST') {
+          // Only throw if it's a different error
+          if (!e?.message?.includes('already exists')) {
+            throw e;
+          }
+        }
+      }
+
       // Touch the DB via a model query so missing tables surface (SELECT 1 would not).
       await prisma.uploadSession.findFirst({ select: { id: true } });
       return;
