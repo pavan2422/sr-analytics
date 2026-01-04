@@ -16,19 +16,52 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
   const filters = useStore((s) => s.filters);
   const setFilters = useStore((s) => s.setFilters);
   const _useIndexedDB = useStore((s) => s._useIndexedDB);
+  const _useBackend = useStore((s) => s._useBackend);
+  const backendUploadId = useStore((s) => s.backendUploadId);
   const filteredTransactionCount = useStore((s) => s.filteredTransactionCount);
   const getSampleFilteredTransactions = useStore((s) => s.getSampleFilteredTransactions);
 
   const [sample, setSample] = useState<Transaction[]>([]);
+  const [backendOptions, setBackendOptions] = useState<{ pgs: string[]; banks: string[]; cardTypes: string[] } | null>(null);
   const paymentModeKey = useMemo(() => paymentMode.join('|'), [paymentMode]);
 
   useEffect(() => {
+    if (_useIndexedDB && _useBackend) {
+      setSample([]);
+      if (filteredTransactionCount === 0 || !backendUploadId) {
+        setBackendOptions(null);
+        return;
+      }
+      let cancelled = false;
+      (async () => {
+        const params = new URLSearchParams();
+        for (const pm of paymentMode) params.append('paymentModes', pm);
+        const res = await fetch(`/api/uploads/${backendUploadId}/filter-options?${params.toString()}`);
+        if (!res.ok) throw new Error(`Failed to load filter options (${res.status})`);
+        const json = (await res.json()) as { pgs?: string[]; banks?: string[]; cardTypes?: string[] };
+        if (!cancelled) {
+          setBackendOptions({
+            pgs: (json.pgs || []).filter(Boolean).sort(),
+            banks: (json.banks || []).filter(Boolean).sort(),
+            cardTypes: (json.cardTypes || []).filter(Boolean).sort(),
+          });
+        }
+      })().catch(() => {
+        if (!cancelled) setBackendOptions(null);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
     if (!_useIndexedDB) {
       setSample([]);
+      setBackendOptions(null);
       return;
     }
     if (filteredTransactionCount === 0) {
       setSample([]);
+      setBackendOptions(null);
       return;
     }
     let cancelled = false;
@@ -44,7 +77,7 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
     return () => {
       cancelled = true;
     };
-  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions, paymentModeKey, paymentMode]);
+  }, [_useIndexedDB, _useBackend, backendUploadId, filteredTransactionCount, getSampleFilteredTransactions, paymentModeKey, paymentMode]);
 
   // Filter transactions by payment mode
   const filteredTxs = useMemo(() => {
@@ -54,6 +87,7 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
   }, [_useIndexedDB, sample, rawTransactions, paymentMode]);
 
   const pgs = useMemo(() => {
+    if (_useIndexedDB && _useBackend) return backendOptions?.pgs ?? [];
     return Array.from(
       new Set(
         filteredTxs
@@ -64,12 +98,13 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
           })
       )
     ).sort();
-  }, [filteredTxs]);
+  }, [_useIndexedDB, _useBackend, backendOptions, filteredTxs]);
 
   // For UPI, show INTENT/COLLECT instead of raw bankname
   const isUPITab = paymentMode.some((pm) => ['UPI', 'UPI_CREDIT_CARD', 'UPI_PPI'].includes(pm));
   
   const banks = useMemo(() => {
+    if (_useIndexedDB && _useBackend) return backendOptions?.banks ?? [];
     if (isUPITab) {
       // For UPI, classify flows and show INTENT/COLLECT
       const flows = new Set<string>();
@@ -82,13 +117,15 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
       // For other tabs, show actual bank names
       return Array.from(new Set(filteredTxs.map((tx) => tx.bankname).filter(Boolean))).sort();
     }
-  }, [filteredTxs, isUPITab]);
+  }, [_useIndexedDB, _useBackend, backendOptions, filteredTxs, isUPITab]);
 
   const cardTypes = useMemo(() => {
+    if (_useIndexedDB && _useBackend) return backendOptions?.cardTypes ?? [];
     return Array.from(new Set(filteredTxs.map((tx) => tx.cardtype).filter(Boolean))).sort();
-  }, [filteredTxs]);
+  }, [_useIndexedDB, _useBackend, backendOptions, filteredTxs]);
 
-  if (filteredTxs.length === 0) {
+  const hasAnyOptions = pgs.length > 0 || banks.length > 0 || cardTypes.length > 0;
+  if (!hasAnyOptions) {
     return null;
   }
 

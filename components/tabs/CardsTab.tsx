@@ -16,13 +16,58 @@ export function CardsTab() {
   // Use selector to only subscribe to filteredTransactions
   const filteredTransactions = useStore((state) => state.filteredTransactions);
   const _useIndexedDB = useStore((state) => state._useIndexedDB);
+  const _useBackend = useStore((state) => state._useBackend);
+  const backendUploadId = useStore((state) => state.backendUploadId);
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
   const filters = useStore((state) => state.filters);
 
   const [sample, setSample] = useState<Transaction[]>([]);
+  const [backendMetrics, setBackendMetrics] = useState<ReturnType<typeof computeCardMetrics> | null>(null);
+  const [isLoadingBackend, setIsLoadingBackend] = useState(false);
 
   useEffect(() => {
+    if (_useIndexedDB && _useBackend) {
+      setSample([]);
+      if (filteredTransactionCount === 0) {
+        setBackendMetrics(null);
+        return;
+      }
+      if (!backendUploadId) {
+        setBackendMetrics(null);
+        return;
+      }
+      let cancelled = false;
+      setIsLoadingBackend(true);
+      (async () => {
+        const res = await fetch(`/api/uploads/${backendUploadId}/card-metrics`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
+            endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
+            paymentModes: filters.paymentModes || [],
+            merchantIds: filters.merchantIds || [],
+            pgs: filters.pgs || [],
+            banks: filters.banks || [],
+            cardTypes: filters.cardTypes || [],
+          }),
+        });
+        if (!res.ok) throw new Error(`Failed to load card metrics (${res.status})`);
+        const json = (await res.json()) as ReturnType<typeof computeCardMetrics>;
+        if (!cancelled) setBackendMetrics(json);
+      })()
+        .catch(() => {
+          if (!cancelled) setBackendMetrics(null);
+        })
+        .finally(() => {
+          if (!cancelled) setIsLoadingBackend(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
     if (!_useIndexedDB) {
       setSample([]);
       return;
@@ -41,12 +86,30 @@ export function CardsTab() {
     return () => {
       cancelled = true;
     };
-  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions, filters]);
+  }, [_useIndexedDB, _useBackend, backendUploadId, filteredTransactionCount, getSampleFilteredTransactions, filters]);
 
   const cardMetrics = useMemo(() => {
+    if (_useIndexedDB && _useBackend) {
+      return (
+        backendMetrics || {
+          pgLevel: [],
+          cardTypeLevel: [],
+          scopeLevel: [],
+          authLevels: {
+            processingCardType: [],
+            nativeOtpEligible: [],
+            isFrictionless: [],
+            nativeOtpAction: [],
+            cardPar: [],
+            cvvPresent: [],
+          },
+          failureRCA: [],
+        }
+      );
+    }
     const source = _useIndexedDB ? sample : filteredTransactions;
     return computeCardMetrics(source);
-  }, [filteredTransactions, _useIndexedDB, sample]);
+  }, [filteredTransactions, _useIndexedDB, _useBackend, sample, backendMetrics]);
 
   const baseColumns: ColumnDef<GroupedMetrics>[] = useMemo(
     () => [
@@ -122,6 +185,12 @@ export function CardsTab() {
     <div className="space-y-8">
       {/* Tab-specific Filters */}
       <TabFilters paymentMode={CARD_PAYMENT_MODES as unknown as string[]} />
+
+      {_useIndexedDB && _useBackend && isLoadingBackend && (
+        <div className="bg-card border border-border rounded-lg p-4">
+          <p className="text-sm text-muted-foreground">Computing Cards tab metrics from the full dataset…</p>
+        </div>
+      )}
 
       {/* PG Level */}
       <div>

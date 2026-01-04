@@ -7,13 +7,15 @@ import { Chart } from '@/components/Chart';
 import { OverviewChart } from '@/components/OverviewChart';
 import { formatNumber, formatCurrency } from '@/lib/utils';
 import { Transaction } from '@/types';
-import { computeOverviewBreakdowns } from '@/lib/overview-breakdowns';
+import { computeOverviewBreakdowns, type OverviewBreakdowns } from '@/lib/overview-breakdowns';
 
 export function OverviewTab() {
   // Use selectors to only subscribe to needed state slices
   const globalMetrics = useStore((state) => state.globalMetrics);
   const dailyTrends = useStore((state) => state.dailyTrends);
   const _useIndexedDB = useStore((state) => state._useIndexedDB);
+  const _useBackend = useStore((state) => state._useBackend);
+  const backendUploadId = useStore((state) => state.backendUploadId);
   const filteredTransactions = useStore((state) => state.filteredTransactions);
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
@@ -22,12 +24,14 @@ export function OverviewTab() {
   // Sample used for breakdown charts. For IndexedDB mode this is a bounded sample (memory-safe).
   const [sample, setSample] = useState<Transaction[]>([]);
   const [sampleStatus, setSampleStatus] = useState<'idle' | 'loading' | 'ready'>('idle');
+  const [breakdowns, setBreakdowns] = useState<OverviewBreakdowns>(() => computeOverviewBreakdowns([], []));
 
   useEffect(() => {
     // If there's no data, clear sample
     if (!globalMetrics || filteredTransactionCount === 0) {
       setSample([]);
       setSampleStatus('idle');
+      setBreakdowns(computeOverviewBreakdowns([], dailyTrends));
       return;
     }
 
@@ -35,11 +39,34 @@ export function OverviewTab() {
     const run = async () => {
       try {
         setSampleStatus('loading');
-        if (_useIndexedDB) {
+        if (_useIndexedDB && _useBackend) {
+          if (!backendUploadId) throw new Error('Missing backend upload id');
+          const params = new URLSearchParams();
+          if (filters.dateRange.start) params.set('startDate', filters.dateRange.start.toISOString());
+          if (filters.dateRange.end) params.set('endDate', filters.dateRange.end.toISOString());
+          for (const pm of filters.paymentModes || []) params.append('paymentModes', pm);
+          for (const id of filters.merchantIds || []) params.append('merchantIds', id);
+          for (const pg of filters.pgs || []) params.append('pgs', pg);
+          for (const b of filters.banks || []) params.append('banks', b);
+          for (const ct of filters.cardTypes || []) params.append('cardTypes', ct);
+
+          const res = await fetch(`/api/uploads/${backendUploadId}/overview-breakdowns?${params.toString()}`);
+          if (!res.ok) {
+            const msg = await res.text().catch(() => '');
+            throw new Error(`Failed to load breakdowns (${res.status}): ${msg}`);
+          }
+          const json = (await res.json()) as OverviewBreakdowns;
+          if (!cancelled) {
+            setSample([]); // not used in backend mode
+            setBreakdowns(json);
+            setSampleStatus('ready');
+          }
+        } else if (_useIndexedDB) {
           // For large datasets, compute from a bounded sample.
           const txs = await getSampleFilteredTransactions(50000);
           if (!cancelled) {
             setSample(txs);
+            setBreakdowns(computeOverviewBreakdowns(txs, dailyTrends));
             setSampleStatus('ready');
           }
         } else {
@@ -47,12 +74,14 @@ export function OverviewTab() {
           const capped = filteredTransactions.length > 200000 ? filteredTransactions.slice(0, 200000) : filteredTransactions;
           if (!cancelled) {
             setSample(capped);
+            setBreakdowns(computeOverviewBreakdowns(capped, dailyTrends));
             setSampleStatus('ready');
           }
         }
       } catch (e) {
         if (!cancelled) {
           setSample([]);
+          setBreakdowns(computeOverviewBreakdowns([], dailyTrends));
           setSampleStatus('ready');
         }
       }
@@ -62,7 +91,17 @@ export function OverviewTab() {
     return () => {
       cancelled = true;
     };
-  }, [_useIndexedDB, filteredTransactionCount, filteredTransactions, getSampleFilteredTransactions, globalMetrics, filters]);
+  }, [
+    _useIndexedDB,
+    _useBackend,
+    backendUploadId,
+    filteredTransactionCount,
+    filteredTransactions,
+    getSampleFilteredTransactions,
+    globalMetrics,
+    filters,
+    dailyTrends,
+  ]);
 
   // Transaction Status Distribution (from globalMetrics - no need to recompute)
   const statusDistribution = useMemo(() => {
@@ -82,10 +121,6 @@ export function OverviewTab() {
       sr: trend.sr,
     }));
   }, [dailyTrends]);
-
-  const breakdowns = useMemo(() => {
-    return computeOverviewBreakdowns(sample, dailyTrends);
-  }, [sample, dailyTrends]);
 
   const {
     paymentModeData,

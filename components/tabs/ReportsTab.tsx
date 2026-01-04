@@ -10,8 +10,12 @@ import { Transaction } from '@/types';
 export function ReportsTab() {
   const filteredTransactions = useStore((state) => state.filteredTransactions);
   const _useIndexedDB = useStore((state) => state._useIndexedDB);
+  const _useBackend = useStore((state) => state._useBackend);
+  const backendUploadId = useStore((state) => state.backendUploadId);
+  const filters = useStore((state) => state.filters);
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
+  const getIndexedDBFilterOptions = useStore((state) => state.getIndexedDBFilterOptions);
   
   const [reportType, setReportType] = useState<ReportType>('daily');
   const [selectedPaymentModes, setSelectedPaymentModes] = useState<string[]>([]);
@@ -20,20 +24,29 @@ export function ReportsTab() {
   // For IndexedDB mode, we don't keep transactions in memory. Use a bounded sample for reports.
   const isLargeFile = _useIndexedDB && filteredTransactions.length === 0;
   const [sample, setSample] = useState<Transaction[]>([]);
+  const [backendPaymentModes, setBackendPaymentModes] = useState<string[]>([]);
 
   // Load a bounded sample for report generation in IndexedDB mode
   useEffect(() => {
     if (!_useIndexedDB) {
       setSample([]);
+      setBackendPaymentModes([]);
       return;
     }
     if (filteredTransactionCount === 0) {
       setSample([]);
+      setBackendPaymentModes([]);
       return;
     }
     let cancelled = false;
     (async () => {
       try {
+        if (_useBackend) {
+          const opts = await getIndexedDBFilterOptions();
+          if (!cancelled) setBackendPaymentModes(opts.paymentModes || []);
+          setSample([]);
+          return;
+        }
         const txs = await getSampleFilteredTransactions(50000);
         if (!cancelled) setSample(txs);
       } catch {
@@ -43,14 +56,15 @@ export function ReportsTab() {
     return () => {
       cancelled = true;
     };
-  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions]);
+  }, [_useIndexedDB, _useBackend, filteredTransactionCount, getSampleFilteredTransactions, getIndexedDBFilterOptions]);
 
   // Get available payment modes from filtered transactions
   const availablePaymentModes = useMemo(() => {
+    if (_useIndexedDB && _useBackend) return backendPaymentModes;
     const source = isLargeFile ? sample : filteredTransactions;
     const modes = new Set(source.map(tx => tx.paymentmode).filter(Boolean));
     return Array.from(modes).sort();
-  }, [filteredTransactions, isLargeFile, sample]);
+  }, [_useIndexedDB, _useBackend, backendPaymentModes, filteredTransactions, isLargeFile, sample]);
 
   // Filter transactions by selected payment modes
   const reportTransactions = useMemo(() => {
@@ -64,26 +78,64 @@ export function ReportsTab() {
   const canGenerate = useMemo(() => {
     // Large-file mode can still generate a report, but it's based on a bounded sample
     // (we do not keep the full filtered set in memory/IndexedDB in this tab).
+    if (_useIndexedDB && _useBackend) return Boolean(backendUploadId) && filteredTransactionCount > 0;
     return reportTransactions.length > 0;
-  }, [reportTransactions.length]);
+  }, [_useIndexedDB, _useBackend, backendUploadId, filteredTransactionCount, reportTransactions.length]);
 
   const handleGenerateReport = useCallback(async () => {
     if (!canGenerate) return;
 
     setIsGenerating(true);
     try {
-      // Generate report for selected type and payment modes
-      const sheets = generateReport(reportTransactions, reportType, selectedPaymentModes);
-      
-      // Export to Excel
-      exportToExcel(sheets);
+      if (_useIndexedDB && _useBackend) {
+        if (!backendUploadId) throw new Error('Missing backend upload id');
+        const res = await fetch(`/api/uploads/${backendUploadId}/report`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            reportType,
+            selectedPaymentModes,
+            filters: {
+              startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
+              endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
+              paymentModes: filters.paymentModes || [],
+              merchantIds: filters.merchantIds || [],
+              pgs: filters.pgs || [],
+              banks: filters.banks || [],
+              cardTypes: filters.cardTypes || [],
+            },
+          }),
+        });
+        if (!res.ok) {
+          const msg = await res.text().catch(() => '');
+          throw new Error(`Failed to generate backend report (${res.status}): ${msg}`);
+        }
+
+        const blob = await res.blob();
+        const cd = res.headers.get('content-disposition') || '';
+        const m = /filename=\"?([^\";]+)\"?/i.exec(cd);
+        const filename = m?.[1] || `SR_Analysis_${reportType}.xlsx`;
+
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      } else {
+        // Generate report for selected type and payment modes (client-side)
+        const sheets = generateReport(reportTransactions, reportType, selectedPaymentModes);
+        exportToExcel(sheets);
+      }
     } catch (error) {
       console.error('Error generating report:', error);
       alert('Failed to generate report. Please check the console for details.');
     } finally {
       setIsGenerating(false);
     }
-  }, [reportTransactions, reportType, selectedPaymentModes, canGenerate]);
+  }, [_useIndexedDB, _useBackend, backendUploadId, filters, reportTransactions, reportType, selectedPaymentModes, canGenerate]);
 
   return (
     <div className="space-y-6">
@@ -91,11 +143,19 @@ export function ReportsTab() {
       <div className="bg-card border border-border rounded-lg p-6">
         <h2 className="text-xl font-semibold mb-6">SR Analysis Report</h2>
         
-        {isLargeFile && (
+        {isLargeFile && !_useBackend && (
           <div className="mb-6 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
             <p className="text-sm text-yellow-800 dark:text-yellow-200">
               You uploaded a large file. Reports will be generated from a bounded sample (up to 50,000 transactions),
               so totals may differ slightly from the full dataset.
+            </p>
+          </div>
+        )}
+
+        {isLargeFile && _useBackend && (
+          <div className="mb-6 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+            <p className="text-sm text-yellow-800 dark:text-yellow-200">
+              Large file detected. Reports are generated from the full dataset on the server (no sampling). This may take a few minutes.
             </p>
           </div>
         )}
@@ -189,7 +249,7 @@ export function ReportsTab() {
       </div>
 
       {/* Preview Section */}
-      {reportTransactions.length === 0 && (
+      {!(_useIndexedDB && _useBackend) && reportTransactions.length === 0 && (
         <div className="bg-card border border-border rounded-lg p-6 text-center">
           <p className="text-muted-foreground">No transactions available for the selected filters.</p>
         </div>
