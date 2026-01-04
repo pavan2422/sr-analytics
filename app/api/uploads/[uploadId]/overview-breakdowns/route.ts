@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import fs from 'node:fs';
 import csvParser from 'csv-parser';
 import { format, parse } from 'date-fns';
-import { prisma } from '@/lib/prisma';
 import { calculateSR } from '@/lib/utils';
 import { getFailureLabel } from '@/lib/failure-utils';
 import { classifyUPIFlow } from '@/lib/data-normalization';
@@ -77,6 +76,8 @@ function toSortedBarData(map: Map<string, { total: number; success: number }>) {
 export async function GET(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
   const { uploadId } = await ctx.params;
   const url = new URL(req.url);
+
+  const { prisma } = await import('@/lib/prisma');
 
   const startDate = url.searchParams.get('startDate') ? new Date(String(url.searchParams.get('startDate'))) : null;
   const endDateRaw = url.searchParams.get('endDate') ? new Date(String(url.searchParams.get('endDate'))) : null;

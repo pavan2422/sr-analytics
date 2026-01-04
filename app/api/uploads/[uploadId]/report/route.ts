@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import csvParser from 'csv-parser';
 import * as XLSX from 'xlsx';
 import { format, parse, startOfWeek } from 'date-fns';
-import { prisma } from '@/lib/prisma';
 import { extractUPIHandle } from '@/lib/data-normalization';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
 
@@ -141,6 +140,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
   const { uploadId } = await ctx.params;
   const body = (await req.json().catch(() => null)) as ReportRequestBody | null;
   if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+
+  const { prisma } = await import('@/lib/prisma');
 
   const { reportType } = body;
   const timeCol = getTimeCol(reportType);

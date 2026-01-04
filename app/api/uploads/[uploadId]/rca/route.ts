@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import fs from 'node:fs';
 import csvParser from 'csv-parser';
 import { format, parse } from 'date-fns';
-import { prisma } from '@/lib/prisma';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
 import { classifyUPIFlow } from '@/lib/data-normalization';
 import { computePeriodComparison, computeUserDroppedAnalysis } from '@/lib/rca';
@@ -77,6 +76,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
   const { uploadId } = await ctx.params;
   const body = (await req.json().catch(() => null)) as RCABody | null;
   if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+
+  const { prisma } = await import('@/lib/prisma');
 
   const session = await prisma.uploadSession.findUnique({
     where: { id: uploadId },

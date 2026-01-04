@@ -4,7 +4,7 @@ import csvParser from 'csv-parser';
 import { format, parse } from 'date-fns';
 import { calculateSR } from '@/lib/utils';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
-import { prisma } from '@/lib/prisma';
+
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -100,6 +100,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
   const { uploadId } = await ctx.params;
   const body = (await req.json().catch(() => null)) as MetricsBody | null;
   if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+
+  const { prisma } = await import('@/lib/prisma');
 
   const session = await prisma.uploadSession.findUnique({
     where: { id: uploadId },
