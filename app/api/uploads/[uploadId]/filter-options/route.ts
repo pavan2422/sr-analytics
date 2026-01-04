@@ -3,32 +3,50 @@ import fs from 'node:fs';
 import csvParser from 'csv-parser';
 import { classifyUPIFlow } from '@/lib/data-normalization';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
-  const { uploadId } = await ctx.params;
-  const url = new URL(req.url);
+  try {
+    const { uploadId } = await ctx.params;
+    const url = new URL(req.url);
 
-  const { prisma } = await import('@/lib/prisma');
+    const { prisma } = await import('@/lib/prisma');
 
-  const paymentModeFilter = url.searchParams.getAll('paymentModes').map((s) => String(s).toUpperCase().trim()).filter(Boolean);
-  const paymentModeSet = paymentModeFilter.length ? new Set(paymentModeFilter) : null;
+    try {
+      await ensureDatabaseReady();
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+      return NextResponse.json(
+        { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+        { status: isLocked ? 503 : 500 }
+      );
+    }
 
-  const session = await prisma.uploadSession.findUnique({
-    where: { id: uploadId },
-    include: { storedFile: true },
-  });
-  if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
-  if (session.status !== 'completed' || !session.storedFile) {
-    return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
-  }
+    const paymentModeFilter = url.searchParams.getAll('paymentModes').map((s) => String(s).toUpperCase().trim()).filter(Boolean);
+    const paymentModeSet = paymentModeFilter.length ? new Set(paymentModeFilter) : null;
 
-  const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
-  if (!fs.existsSync(filePath)) {
-    return NextResponse.json({ error: 'Stored file missing on disk' }, { status: 500 });
-  }
+    const session = await prisma.uploadSession.findUnique({
+      where: { id: uploadId },
+      include: { storedFile: true },
+    });
+    if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
+    if (session.status !== 'completed' || !session.storedFile) {
+      return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
+    }
+
+    const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
+    if (!fs.existsSync(filePath)) {
+      return NextResponse.json({ 
+        error: 'Stored file missing on disk',
+        storagePath: session.storedFile.storagePath,
+        resolvedPath: filePath,
+        uploadId
+      }, { status: 500 });
+    }
 
   const paymentModes = new Set<string>();
   const merchantIds = new Set<string>();
@@ -98,20 +116,32 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
     stream.on('close', () => resolve());
   });
 
-  return NextResponse.json(
-    {
-      paymentModes: Array.from(paymentModes.values()).sort(),
-      merchantIds: Array.from(merchantIds.values()).sort(),
-      truncated,
-      pgs: Array.from(pgs.values()).sort(),
-      banks: Array.from(banks.values()).sort(),
-      cardTypes: Array.from(cardTypes.values()).sort(),
-      truncatedPgs,
-      truncatedBanks,
-      truncatedCardTypes,
-    },
-    { status: 200 }
-  );
+    return NextResponse.json(
+      {
+        paymentModes: Array.from(paymentModes.values()).sort(),
+        merchantIds: Array.from(merchantIds.values()).sort(),
+        truncated,
+        pgs: Array.from(pgs.values()).sort(),
+        banks: Array.from(banks.values()).sort(),
+        cardTypes: Array.from(cardTypes.values()).sort(),
+        truncatedPgs,
+        truncatedBanks,
+        truncatedCardTypes,
+      },
+      { status: 200 }
+    );
+  } catch (e: any) {
+    const msg = String(e?.message || 'Unknown error');
+    return NextResponse.json(
+      {
+        error: 'Internal server error while computing filter options',
+        message: msg,
+        code: e?.code,
+        stack: process.env.NODE_ENV === 'development' ? e?.stack : undefined,
+      },
+      { status: 500 }
+    );
+  }
 }
 
 

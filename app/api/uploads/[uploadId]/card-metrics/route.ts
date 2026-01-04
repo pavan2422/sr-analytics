@@ -4,6 +4,7 @@ import csvParser from 'csv-parser';
 import { format, parse } from 'date-fns';
 import { calculateSR } from '@/lib/utils';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 import { classifyCardScope, classifyUPIFlow } from '@/lib/data-normalization';
 import { getFailureLabel } from '@/lib/failure-utils';
 import type { DailyTrend, FailureRCA, GroupedMetrics } from '@/types';
@@ -112,12 +113,24 @@ function toGroupedMetrics(map: Map<string, GroupAgg>): GroupedMetrics[] {
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
-  const { uploadId } = await ctx.params;
-  const body = (await req.json().catch(() => null)) as MetricsBody | null;
-  if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  try {
+    const { uploadId } = await ctx.params;
+    const body = (await req.json().catch(() => null)) as MetricsBody | null;
+    if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
 
-  // Lazy import to avoid Prisma initialization during Next/Vercel build-time module evaluation.
-  const { prisma } = await import('@/lib/prisma');
+    // Lazy import to avoid Prisma initialization during Next/Vercel build-time module evaluation.
+    const { prisma } = await import('@/lib/prisma');
+
+    try {
+      await ensureDatabaseReady();
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+      return NextResponse.json(
+        { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+        { status: isLocked ? 503 : 500 }
+      );
+    }
 
   const session = await prisma.uploadSession.findUnique({
     where: { id: uploadId },
@@ -287,13 +300,13 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
     })
     .sort((a, b) => b.failureCount - a.failureCount);
 
-  return NextResponse.json(
-    {
-      pgLevel: toGroupedMetrics(pgAgg),
-      cardTypeLevel: toGroupedMetrics(cardTypeAgg),
-      scopeLevel: toGroupedMetrics(scopeAgg),
-      authLevels: {
-        processingCardType: toGroupedMetrics(authLevels.processingCardType),
+    return NextResponse.json(
+      {
+        pgLevel: toGroupedMetrics(pgAgg),
+        cardTypeLevel: toGroupedMetrics(cardTypeAgg),
+        scopeLevel: toGroupedMetrics(scopeAgg),
+        authLevels: {
+          processingCardType: toGroupedMetrics(authLevels.processingCardType),
         nativeOtpEligible: toGroupedMetrics(authLevels.nativeOtpEligible),
         isFrictionless: toGroupedMetrics(authLevels.isFrictionless),
         nativeOtpAction: toGroupedMetrics(authLevels.nativeOtpAction),
@@ -304,6 +317,18 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
     },
     { status: 200 }
   );
+  } catch (e: any) {
+    const msg = String(e?.message || 'Unknown error');
+    return NextResponse.json(
+      {
+        error: 'Internal server error while computing card metrics',
+        message: msg,
+        code: e?.code,
+        stack: process.env.NODE_ENV === 'development' ? e?.stack : undefined,
+      },
+      { status: 500 }
+    );
+  }
 }
 
 

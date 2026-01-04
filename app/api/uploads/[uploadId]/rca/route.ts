@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import csvParser from 'csv-parser';
 import { format, parse } from 'date-fns';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 import { classifyUPIFlow } from '@/lib/data-normalization';
 import { computePeriodComparison, computeUserDroppedAnalysis } from '@/lib/rca';
 import { compareCustomerSegments, detectProblematicCustomers } from '@/lib/customer-analytics';
@@ -73,25 +74,42 @@ function upper(v: any): string {
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
-  const { uploadId } = await ctx.params;
-  const body = (await req.json().catch(() => null)) as RCABody | null;
-  if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  try {
+    const { uploadId } = await ctx.params;
+    const body = (await req.json().catch(() => null)) as RCABody | null;
+    if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
 
-  const { prisma } = await import('@/lib/prisma');
+    const { prisma } = await import('@/lib/prisma');
 
-  const session = await prisma.uploadSession.findUnique({
-    where: { id: uploadId },
-    include: { storedFile: true },
-  });
-  if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
-  if (session.status !== 'completed' || !session.storedFile) {
-    return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
-  }
+    try {
+      await ensureDatabaseReady();
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+      return NextResponse.json(
+        { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+        { status: isLocked ? 503 : 500 }
+      );
+    }
 
-  const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
-  if (!fs.existsSync(filePath)) {
-    return NextResponse.json({ error: 'Stored file missing on disk' }, { status: 500 });
-  }
+    const session = await prisma.uploadSession.findUnique({
+      where: { id: uploadId },
+      include: { storedFile: true },
+    });
+    if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
+    if (session.status !== 'completed' || !session.storedFile) {
+      return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
+    }
+
+    const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
+    if (!fs.existsSync(filePath)) {
+      return NextResponse.json({ 
+        error: 'Stored file missing on disk',
+        storagePath: session.storedFile.storagePath,
+        resolvedPath: filePath,
+        uploadId
+      }, { status: 500 });
+    }
 
   const startDate = body.filters.startDate ? new Date(body.filters.startDate) : null;
   const endDateRaw = body.filters.endDate ? new Date(body.filters.endDate) : null;
@@ -247,19 +265,31 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
   const customerAnalytics = compareCustomerSegments(current, previous);
   const problematicCustomers = detectProblematicCustomers(current);
 
-  return NextResponse.json(
-    {
-      comparison,
-      userDroppedAnalysis,
-      customerAnalytics,
-      problematicCustomers,
-      periods: {
-        current: { start: currentPeriodStart.toISOString(), end: currentPeriodEnd.toISOString() },
-        previous: { start: previousPeriodStart.toISOString(), end: previousPeriodEnd.toISOString() },
+    return NextResponse.json(
+      {
+        comparison,
+        userDroppedAnalysis,
+        customerAnalytics,
+        problematicCustomers,
+        periods: {
+          current: { start: currentPeriodStart.toISOString(), end: currentPeriodEnd.toISOString() },
+          previous: { start: previousPeriodStart.toISOString(), end: previousPeriodEnd.toISOString() },
+        },
       },
-    },
-    { status: 200 }
-  );
+      { status: 200 }
+    );
+  } catch (e: any) {
+    const msg = String(e?.message || 'Unknown error');
+    return NextResponse.json(
+      {
+        error: 'Internal server error while computing RCA',
+        message: msg,
+        code: e?.code,
+        stack: process.env.NODE_ENV === 'development' ? e?.stack : undefined,
+      },
+      { status: 500 }
+    );
+  }
 }
 
 

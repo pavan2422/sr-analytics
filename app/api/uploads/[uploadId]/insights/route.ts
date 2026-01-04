@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import csvParser from 'csv-parser';
 import { parse } from 'date-fns';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 import { classifyUPIFlow } from '@/lib/data-normalization';
 import { computeFailureInsightsFromAggregates, computeInsightWindowsFromFailedRange, dateKeyForTime } from '@/lib/server/full-failure-insights';
 
@@ -73,25 +74,42 @@ function groupKey(pm: string, cfDesc: string) {
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
-  const { uploadId } = await ctx.params;
-  const body = (await req.json().catch(() => null)) as InsightsBody | null;
-  if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  try {
+    const { uploadId } = await ctx.params;
+    const body = (await req.json().catch(() => null)) as InsightsBody | null;
+    if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
 
-  const { prisma } = await import('@/lib/prisma');
+    const { prisma } = await import('@/lib/prisma');
 
-  const session = await prisma.uploadSession.findUnique({
-    where: { id: uploadId },
-    include: { storedFile: true },
-  });
-  if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
-  if (session.status !== 'completed' || !session.storedFile) {
-    return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
-  }
+    try {
+      await ensureDatabaseReady();
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+      return NextResponse.json(
+        { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+        { status: isLocked ? 503 : 500 }
+      );
+    }
 
-  const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
-  if (!fs.existsSync(filePath)) {
-    return NextResponse.json({ error: 'Stored file missing on disk' }, { status: 500 });
-  }
+    const session = await prisma.uploadSession.findUnique({
+      where: { id: uploadId },
+      include: { storedFile: true },
+    });
+    if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
+    if (session.status !== 'completed' || !session.storedFile) {
+      return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
+    }
+
+    const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
+    if (!fs.existsSync(filePath)) {
+      return NextResponse.json({ 
+        error: 'Stored file missing on disk',
+        storagePath: session.storedFile.storagePath,
+        resolvedPath: filePath,
+        uploadId
+      }, { status: 500 });
+    }
 
   const startDate = body.startDate ? new Date(body.startDate) : null;
   const endDateRaw = body.endDate ? new Date(body.endDate) : null;
@@ -219,11 +237,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
     stream.on('close', () => resolve());
   });
 
-  const insights = computeFailureInsightsFromAggregates(Array.from(groups.values()), totalFailures, windows);
-  return NextResponse.json(
-    {
-      totalFailures,
-      windows: {
+    const insights = computeFailureInsightsFromAggregates(Array.from(groups.values()), totalFailures, windows);
+    return NextResponse.json(
+      {
+        totalFailures,
+        windows: {
         current: {
           start: windows.current.startDate.toISOString(),
           end: windows.current.endDate.toISOString(),
@@ -240,6 +258,18 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
     },
     { status: 200 }
   );
+  } catch (e: any) {
+    const msg = String(e?.message || 'Unknown error');
+    return NextResponse.json(
+      {
+        error: 'Internal server error while computing insights',
+        message: msg,
+        code: e?.code,
+        stack: process.env.NODE_ENV === 'development' ? e?.stack : undefined,
+      },
+      { status: 500 }
+    );
+  }
 }
 
 

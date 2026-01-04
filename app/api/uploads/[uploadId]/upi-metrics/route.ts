@@ -4,6 +4,7 @@ import csvParser from 'csv-parser';
 import { format, parse } from 'date-fns';
 import { calculateSR } from '@/lib/utils';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 import { classifyUPIFlow, extractUPIHandle } from '@/lib/data-normalization';
 import { getFailureLabel } from '@/lib/failure-utils';
 import type { DailyTrend, FailureRCA, GroupedMetrics } from '@/types';
@@ -119,24 +120,36 @@ function toGroupedMetrics(map: Map<string, GroupAgg>): GroupedMetrics[] {
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
-  const { uploadId } = await ctx.params;
-  const body = (await req.json().catch(() => null)) as MetricsBody | null;
-  if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  try {
+    const { uploadId } = await ctx.params;
+    const body = (await req.json().catch(() => null)) as MetricsBody | null;
+    if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
 
-  const { prisma } = await import('@/lib/prisma');
+    const { prisma } = await import('@/lib/prisma');
 
-  const session = await prisma.uploadSession.findUnique({
-    where: { id: uploadId },
-    include: { storedFile: true },
-  });
+    try {
+      await ensureDatabaseReady();
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+        return NextResponse.json(
+        { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+        { status: isLocked ? 503 : 500 }
+      );
+    }
+
+    const session = await prisma.uploadSession.findUnique({
+      where: { id: uploadId },
+      include: { storedFile: true },
+    });
   if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
   if (session.status !== 'completed' || !session.storedFile) {
-    return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
+      return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
   }
 
   const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
   if (!fs.existsSync(filePath)) {
-    return NextResponse.json({ error: 'Stored file missing on disk' }, { status: 500 });
+      return NextResponse.json({ error: 'Stored file missing on disk' }, { status: 500 });
   }
 
   const startDate = body.startDate ? new Date(body.startDate) : null;
@@ -278,16 +291,28 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
     })
     .sort((a, b) => b.failureCount - a.failureCount);
 
-  return NextResponse.json(
-    {
-      pgLevel: toGroupedMetrics(pgAgg),
-      flowLevel: toGroupedMetrics(flowAgg),
-      handleLevel: toGroupedMetrics(handleAgg).filter((g) => g.group !== 'Unknown'),
-      pspLevel: toGroupedMetrics(pspAgg),
-      failureRCA,
-    },
-    { status: 200 }
-  );
+    return NextResponse.json(
+      {
+        pgLevel: toGroupedMetrics(pgAgg),
+        flowLevel: toGroupedMetrics(flowAgg),
+        handleLevel: toGroupedMetrics(handleAgg).filter((g) => g.group !== 'Unknown'),
+        pspLevel: toGroupedMetrics(pspAgg),
+        failureRCA,
+      },
+      { status: 200 }
+    );
+  } catch (e: any) {
+    const msg = String(e?.message || 'Unknown error');
+    return NextResponse.json(
+      {
+        error: 'Internal server error while computing UPI metrics',
+        message: msg,
+        code: e?.code,
+        stack: process.env.NODE_ENV === 'development' ? e?.stack : undefined,
+      },
+      { status: 500 }
+    );
+  }
 }
 
 
