@@ -1369,9 +1369,18 @@ export const useStore = create<StoreState>()(
 
           // Backend mode: we may not have a local transactionCount, but we can recompute from server.
           if (store._useBackend && store.backendUploadId) {
-            void store.applyFilters().catch((e) => {
-              console.error('Error applying filters after rehydrate (backend mode):', e);
-            });
+            // Wait a bit for session to be ready after rehydration
+            setTimeout(() => {
+              void store.applyFilters().catch((e) => {
+                console.error('Error applying filters after rehydrate (backend mode):', e);
+                // Retry once more after delay
+                setTimeout(() => {
+                  void store.applyFilters().catch((err) => {
+                    console.error('Error applying filters after rehydrate retry:', err);
+                  });
+                }, 2000);
+              });
+            }, 500);
             return;
           }
           
