@@ -29,16 +29,67 @@ function isMissingTableOrSchemaError(err: any): boolean {
 
 function prismaCliPath(): string {
   // On Windows, npm creates prisma.cmd in node_modules/.bin.
+  // On Vercel/serverless, node_modules might be in a different location
   const bin = process.platform === 'win32' ? 'prisma.cmd' : 'prisma';
+  
+  // Try multiple possible locations
+  const possiblePaths = [
+    path.join(process.cwd(), 'node_modules', '.bin', bin),
+    path.join(__dirname, '..', '..', 'node_modules', '.bin', bin),
+    path.join(process.cwd(), '..', 'node_modules', '.bin', bin),
+  ];
+  
+  // Return the first path that exists, or the default
+  for (const possiblePath of possiblePaths) {
+    try {
+      if (fs.existsSync(possiblePath)) {
+        return possiblePath;
+      }
+    } catch {
+      // Continue to next path
+    }
+  }
+  
+  // Fallback to default
   return path.join(process.cwd(), 'node_modules', '.bin', bin);
 }
 
 async function runMigrations(): Promise<{ stdout: string; stderr: string }> {
   const cli = prismaCliPath();
+  
+  // Check if CLI exists before trying to run it
+  if (!fs.existsSync(cli)) {
+    // On Vercel, try using npx as fallback
+    const isServerless = Boolean(process.env.VERCEL) || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
+    if (isServerless) {
+      try {
+        // Use npx to run prisma (should work if prisma is in dependencies)
+        const { stdout, stderr } = await execFileAsync(
+          'npx',
+          ['prisma', 'migrate', 'deploy', '--schema', path.join(process.cwd(), 'prisma', 'schema.prisma')],
+          {
+            cwd: process.cwd(),
+            env: process.env,
+          }
+        );
+        return { stdout: String(stdout || ''), stderr: String(stderr || '') };
+      } catch (npxErr: any) {
+        throw new Error(
+          `Prisma CLI not found. Tried: ${cli} and npx prisma. Make sure "prisma" is in dependencies. Error: ${npxErr?.message || 'Unknown error'}`,
+          { cause: npxErr }
+        );
+      }
+    }
+    
+    throw new Error(
+      `Prisma CLI not found at ${cli}. Run "npm install" (or move "prisma" from devDependencies to dependencies for production installs).`,
+    );
+  }
+  
   try {
     const { stdout, stderr } = await execFileAsync(
       cli,
-      ['migrate', 'deploy', '--schema', path.join('prisma', 'schema.prisma')],
+      ['migrate', 'deploy', '--schema', path.join(process.cwd(), 'prisma', 'schema.prisma')],
       {
         cwd: process.cwd(),
         env: process.env,
