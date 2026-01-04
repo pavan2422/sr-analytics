@@ -3,12 +3,15 @@ import fs from 'node:fs';
 import csvParser from 'csv-parser';
 import { parse } from 'date-fns';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 import { classifyCardScope, classifyUPIFlow, extractUPIHandle } from '@/lib/data-normalization';
 import { getFailureCategory, getFailureLabel } from '@/lib/failure-utils';
 import type { Transaction } from '@/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// Allow up to 5 minutes for large file processing (Vercel Pro plan max)
+export const maxDuration = 300;
 
 type BreakdownBody = {
   analysisType: 'FAILED' | 'USER_DROPPED';
@@ -99,25 +102,42 @@ function getDimensionValue(tx: Transaction, dimName: string): string {
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
-  const { uploadId } = await ctx.params;
-  const body = (await req.json().catch(() => null)) as BreakdownBody | null;
-  if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  try {
+    const { uploadId } = await ctx.params;
+    const body = (await req.json().catch(() => null)) as BreakdownBody | null;
+    if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
 
-  const { prisma } = await import('@/lib/prisma');
+    const { prisma } = await import('@/lib/prisma');
 
-  const session = await prisma.uploadSession.findUnique({
-    where: { id: uploadId },
-    include: { storedFile: true },
-  });
-  if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
-  if (session.status !== 'completed' || !session.storedFile) {
-    return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
-  }
+    try {
+      await ensureDatabaseReady();
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+      return NextResponse.json(
+        { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+        { status: isLocked ? 503 : 500 }
+      );
+    }
 
-  const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
-  if (!fs.existsSync(filePath)) {
-    return NextResponse.json({ error: 'Stored file missing on disk' }, { status: 500 });
-  }
+    const session = await prisma.uploadSession.findUnique({
+      where: { id: uploadId },
+      include: { storedFile: true },
+    });
+    if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
+    if (session.status !== 'completed' || !session.storedFile) {
+      return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
+    }
+
+    const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
+    if (!fs.existsSync(filePath)) {
+      return NextResponse.json({ 
+        error: 'Stored file missing on disk',
+        storagePath: session.storedFile.storagePath,
+        resolvedPath: filePath,
+        uploadId
+      }, { status: 500 });
+    }
 
   const globalStart = body.filters.startDate ? new Date(body.filters.startDate) : null;
   const globalEndRaw = body.filters.endDate ? new Date(body.filters.endDate) : null;
@@ -218,15 +238,27 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
     stream.on('close', () => resolve());
   });
 
-  const total = Array.from(paymentModeMap.values()).reduce((s, n) => s + n, 0);
-  const paymentModes = Array.from(paymentModeMap.entries())
-    .map(([name, count]) => ({ name, count, percent: total > 0 ? (count / total) * 100 : 0 }))
-    .sort((a, b) => b.count - a.count);
-  const pgs = Array.from(pgMap.entries())
-    .map(([name, count]) => ({ name, count, percent: total > 0 ? (count / total) * 100 : 0 }))
-    .sort((a, b) => b.count - a.count);
+    const total = Array.from(paymentModeMap.values()).reduce((s, n) => s + n, 0);
+    const paymentModes = Array.from(paymentModeMap.entries())
+      .map(([name, count]) => ({ name, count, percent: total > 0 ? (count / total) * 100 : 0 }))
+      .sort((a, b) => b.count - a.count);
+    const pgs = Array.from(pgMap.entries())
+      .map(([name, count]) => ({ name, count, percent: total > 0 ? (count / total) * 100 : 0 }))
+      .sort((a, b) => b.count - a.count);
 
-  return NextResponse.json({ paymentModes, pgs }, { status: 200 });
+    return NextResponse.json({ paymentModes, pgs }, { status: 200 });
+  } catch (e: any) {
+    const msg = String(e?.message || 'Unknown error');
+    return NextResponse.json(
+      {
+        error: 'Internal server error while computing RCA breakdown',
+        message: msg,
+        code: e?.code,
+        stack: process.env.NODE_ENV === 'development' ? e?.stack : undefined,
+      },
+      { status: 500 }
+    );
+  }
 }
 
 
