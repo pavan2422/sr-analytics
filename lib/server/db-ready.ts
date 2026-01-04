@@ -70,9 +70,18 @@ export async function ensureDatabaseReady(): Promise<void> {
 
   global.__srDbReadyPromise = (async () => {
     try {
-      // Ensure the database directory exists (for SQLite file:./dev.db)
-      const dbPath = path.join(process.cwd(), 'prisma', 'dev.db');
-      const dbDir = path.dirname(dbPath);
+      // Ensure the database directory exists
+      // On serverless, use /tmp; otherwise use project directory
+      const isServerless = Boolean(process.env.VERCEL) || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
+      let dbDir: string;
+      
+      if (isServerless) {
+        dbDir = '/tmp/prisma';
+      } else {
+        const dbPath = path.join(process.cwd(), 'prisma', 'dev.db');
+        dbDir = path.dirname(dbPath);
+      }
+      
       try {
         fs.mkdirSync(dbDir, { recursive: true });
       } catch (e: any) {

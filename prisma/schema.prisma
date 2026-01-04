@@ -4,8 +4,8 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  // Local dev default. For production, switch to Postgres and use env("DATABASE_URL").
-  url      = "file:./dev.db"
+  // Use DATABASE_URL if set (for Vercel/serverless), otherwise default to local dev.db
+  url      = env("DATABASE_URL")
 }
 
 model StoredFile {
