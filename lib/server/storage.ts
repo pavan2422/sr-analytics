@@ -6,16 +6,39 @@ import path from 'node:path';
  *
  * We store large files on disk (not in DB) and only keep metadata in Prisma.
  * This avoids buffering multi-GB files in memory and avoids DB bloat.
+ *
+ * On serverless platforms (Vercel, etc.), the filesystem is read-only except /tmp.
+ * We detect this and use /tmp for uploads in those environments.
  */
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+// Detect if we're on a serverless platform (Vercel, AWS Lambda, etc.)
+// These platforms typically have /tmp as the only writable directory
+const isServerless = Boolean(process.env.VERCEL) || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
+
+// Use /tmp on serverless, otherwise use project data directory
+const BASE_DIR = isServerless ? '/tmp' : process.cwd();
+const DATA_DIR = path.join(BASE_DIR, 'data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const UPLOADS_TMP_DIR = path.join(UPLOADS_DIR, 'tmp');
 const UPLOADS_FILES_DIR = path.join(UPLOADS_DIR, 'files');
 
 export function ensureUploadDirs() {
-  fs.mkdirSync(UPLOADS_TMP_DIR, { recursive: true });
-  fs.mkdirSync(UPLOADS_FILES_DIR, { recursive: true });
+  try {
+    // Ensure parent directories exist first
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+    fs.mkdirSync(UPLOADS_TMP_DIR, { recursive: true });
+    fs.mkdirSync(UPLOADS_FILES_DIR, { recursive: true });
+  } catch (e: any) {
+    // If mkdir fails, it might be because the directory already exists
+    // Check if directories actually exist before throwing
+    if (e?.code !== 'EEXIST') {
+      // Only throw if it's not an "already exists" error
+      if (!fs.existsSync(UPLOADS_TMP_DIR) || !fs.existsSync(UPLOADS_FILES_DIR)) {
+        throw e;
+      }
+    }
+  }
 }
 
 export function getUploadSessionTmpDir(uploadId: string) {
@@ -46,7 +69,9 @@ export function buildStoredFileRelativePath(storedFileId: string, originalName: 
 
 export function resolveStoredFileAbsolutePath(storagePath: string) {
   // `storagePath` is stored as relative path (from project root).
-  return path.join(process.cwd(), storagePath);
+  // On serverless, use /tmp; otherwise use process.cwd()
+  const baseDir = isServerless ? '/tmp' : process.cwd();
+  return path.join(baseDir, storagePath);
 }
 
 export function listReceivedParts(uploadId: string): number[] {
