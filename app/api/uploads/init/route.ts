@@ -28,10 +28,16 @@ export async function POST(req: Request) {
     if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
       return NextResponse.json({ error: 'sizeBytes must be > 0' }, { status: 400 });
     }
-    // Keep chunks reasonably sized to avoid request overhead & server limits.
-    if (!Number.isFinite(chunkSizeBytes) || chunkSizeBytes < 1 * 1024 * 1024 || chunkSizeBytes > 128 * 1024 * 1024) {
-      return NextResponse.json({ error: 'chunkSizeBytes must be between 1MB and 128MB' }, { status: 400 });
-    }
+  // Keep chunks reasonably sized to avoid request overhead & server limits.
+  // Vercel has a 4.5MB body size limit, so we cap at 4MB to be safe
+  const maxChunkSize = process.env.VERCEL ? 4 * 1024 * 1024 : 128 * 1024 * 1024;
+  if (!Number.isFinite(chunkSizeBytes) || chunkSizeBytes < 1 * 1024 * 1024 || chunkSizeBytes > maxChunkSize) {
+    return NextResponse.json({ 
+      error: `chunkSizeBytes must be between 1MB and ${Math.floor(maxChunkSize / 1024 / 1024)}MB`,
+      maxChunkSize,
+      vercel: Boolean(process.env.VERCEL)
+    }, { status: 400 });
+  }
 
     try {
       ensureUploadDirs();

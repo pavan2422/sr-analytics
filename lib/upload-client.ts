@@ -37,7 +37,9 @@ export async function uploadFileInChunks(
     cleanupOnError?: boolean;
   }
 ): Promise<{ uploadId: string; storedFileId: string; sha256Hex?: string }> {
-  const chunkSizeBytes = opts?.chunkSizeBytes ?? 16 * 1024 * 1024; // 16MB default
+  // Use 3MB default for Vercel compatibility (Vercel has 4.5MB body size limit)
+  // Can be overridden via opts.chunkSizeBytes
+  const chunkSizeBytes = opts?.chunkSizeBytes ?? 3 * 1024 * 1024; // 3MB default
   const totalBytes = file.size;
 
   onProgress({ processed: 0, total: totalBytes, percentage: 0, stage: 'uploading' });

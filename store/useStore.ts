@@ -678,8 +678,8 @@ export const useStore = create<StoreState>()(
           fileSizes?.[0] === file.size;
 
         const { uploadId, storedFileId } = await uploadFileInChunks(file, progressCallback, {
-          // Slightly smaller chunks reduce risk of proxy/proxy timeouts.
-          chunkSizeBytes: 16 * 1024 * 1024,
+          // Use 3MB chunks for Vercel compatibility (Vercel has 4.5MB body size limit)
+          chunkSizeBytes: 3 * 1024 * 1024,
           uploadId: canResume ? backendUploadId! : undefined,
           onUploadId: (id) => {
             // Persist early so a refresh/crash can resume.
