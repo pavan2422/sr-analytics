@@ -80,14 +80,38 @@ const defaultFilters: FilterState = {
 // Worker manager instances (shared across store)
 const workerManager = new WorkerManager();
 
-async function fetchBackendSample(uploadId: string, maxRows: number) {
-  const res = await fetch(`/api/uploads/${uploadId}/sample?maxRows=${maxRows}`);
-  if (!res.ok) {
-    const msg = await res.text().catch(() => '');
-    throw new Error(`Failed to fetch sample from backend (${res.status}): ${msg}`);
+// Helper function to retry API calls with exponential backoff for 404 errors
+async function retryApiCall<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  isRetryable: (error: any) => boolean = (e) => e?.message?.includes('404') || e?.message?.includes('not found')
+): Promise<T> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      if (isRetryable(error) && attempt < maxRetries - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+        continue;
+      }
+      throw error;
+    }
   }
-  const json = (await res.json()) as { transactions: Transaction[]; storedFileId: string };
-  return json;
+  throw lastError || new Error('Failed after retries');
+}
+
+async function fetchBackendSample(uploadId: string, maxRows: number) {
+  return retryApiCall(async () => {
+    const res = await fetch(`/api/uploads/${uploadId}/sample?maxRows=${maxRows}`);
+    if (!res.ok) {
+      const msg = await res.text().catch(() => '');
+      throw new Error(`Failed to fetch sample from backend (${res.status}): ${msg}`);
+    }
+    const json = (await res.json()) as { transactions: Transaction[]; storedFileId: string };
+    return json;
+  });
 }
 
 function buildBackendFilterQuery(filters: {
@@ -115,63 +139,71 @@ async function fetchBackendSampleFiltered(
   maxRows: number,
   filters: Parameters<typeof buildBackendFilterQuery>[0]
 ) {
-  const params = buildBackendFilterQuery(filters);
-  params.set('maxRows', String(maxRows));
-  const res = await fetch(`/api/uploads/${uploadId}/sample?${params.toString()}`);
-  if (!res.ok) {
-    const msg = await res.text().catch(() => '');
-    throw new Error(`Failed to fetch filtered sample from backend (${res.status}): ${msg}`);
-  }
-  const json = (await res.json()) as { transactions: Transaction[]; storedFileId: string };
-  return json;
+  return retryApiCall(async () => {
+    const params = buildBackendFilterQuery(filters);
+    params.set('maxRows', String(maxRows));
+    const res = await fetch(`/api/uploads/${uploadId}/sample?${params.toString()}`);
+    if (!res.ok) {
+      const msg = await res.text().catch(() => '');
+      throw new Error(`Failed to fetch filtered sample from backend (${res.status}): ${msg}`);
+    }
+    const json = (await res.json()) as { transactions: Transaction[]; storedFileId: string };
+    return json;
+  });
 }
 
 async function fetchBackendMetrics(uploadId: string, filters: Parameters<typeof buildBackendFilterQuery>[0]) {
-  const res = await fetch(`/api/uploads/${uploadId}/metrics`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      startDate: filters.startDate ? filters.startDate.toISOString() : null,
-      endDate: filters.endDate ? filters.endDate.toISOString() : null,
-      paymentModes: filters.paymentModes || [],
-      merchantIds: filters.merchantIds || [],
-      pgs: filters.pgs || [],
-      banks: filters.banks || [],
-      cardTypes: filters.cardTypes || [],
-    }),
+  return retryApiCall(async () => {
+    const res = await fetch(`/api/uploads/${uploadId}/metrics`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        startDate: filters.startDate ? filters.startDate.toISOString() : null,
+        endDate: filters.endDate ? filters.endDate.toISOString() : null,
+        paymentModes: filters.paymentModes || [],
+        merchantIds: filters.merchantIds || [],
+        pgs: filters.pgs || [],
+        banks: filters.banks || [],
+        cardTypes: filters.cardTypes || [],
+      }),
+    });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => '');
+      throw new Error(`Failed to compute backend metrics (${res.status}): ${msg}`);
+    }
+    return (await res.json()) as {
+      filteredTransactionCount: number;
+      globalMetrics: Metrics;
+      dailyTrends: DailyTrend[];
+    };
   });
-  if (!res.ok) {
-    const msg = await res.text().catch(() => '');
-    throw new Error(`Failed to compute backend metrics (${res.status}): ${msg}`);
-  }
-  return (await res.json()) as {
-    filteredTransactionCount: number;
-    globalMetrics: Metrics;
-    dailyTrends: DailyTrend[];
-  };
 }
 
 async function fetchBackendFilterOptions(uploadId: string) {
-  const res = await fetch(`/api/uploads/${uploadId}/filter-options`, { method: 'GET' });
-  if (!res.ok) {
-    const msg = await res.text().catch(() => '');
-    throw new Error(`Failed to load filter options from backend (${res.status}): ${msg}`);
-  }
-  return (await res.json()) as { paymentModes: string[]; merchantIds: string[]; truncated?: boolean };
+  return retryApiCall(async () => {
+    const res = await fetch(`/api/uploads/${uploadId}/filter-options`, { method: 'GET' });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => '');
+      throw new Error(`Failed to load filter options from backend (${res.status}): ${msg}`);
+    }
+    return (await res.json()) as { paymentModes: string[]; merchantIds: string[]; truncated?: boolean };
+  });
 }
 
 async function fetchBackendTimeBounds(uploadId: string, filters: Parameters<typeof buildBackendFilterQuery>[0]) {
-  const params = buildBackendFilterQuery(filters);
-  const res = await fetch(`/api/uploads/${uploadId}/time-bounds?${params.toString()}`, { method: 'GET' });
-  if (!res.ok) {
-    const msg = await res.text().catch(() => '');
-    throw new Error(`Failed to load time bounds from backend (${res.status}): ${msg}`);
-  }
-  const json = (await res.json()) as { min?: string; max?: string };
-  return {
-    min: json.min ? new Date(json.min) : undefined,
-    max: json.max ? new Date(json.max) : undefined,
-  };
+  return retryApiCall(async () => {
+    const params = buildBackendFilterQuery(filters);
+    const res = await fetch(`/api/uploads/${uploadId}/time-bounds?${params.toString()}`, { method: 'GET' });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => '');
+      throw new Error(`Failed to load time bounds from backend (${res.status}): ${msg}`);
+    }
+    const json = (await res.json()) as { min?: string; max?: string };
+    return {
+      min: json.min ? new Date(json.min) : undefined,
+      max: json.max ? new Date(json.max) : undefined,
+    };
+  });
 }
 
 // Stream a HUGE CSV but stop after a fixed number of rows (sample mode).
@@ -997,32 +1029,15 @@ export const useStore = create<StoreState>()(
 
       if (_useBackend) {
         if (!backendUploadId) throw new Error('Missing backend upload id');
-        
-        // Retry logic for serverless cold starts or database write delays
-        let lastError: Error | null = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            const m = await fetchBackendMetrics(backendUploadId, effFilters);
-            set({
-              filteredTransactionCount: m.filteredTransactionCount,
-              globalMetrics: m.globalMetrics,
-              dailyTrends: m.dailyTrends,
-              analysisStage: null,
-            });
-            return;
-          } catch (error: any) {
-            lastError = error;
-            const is404 = error.message?.includes('404') || error.message?.includes('not found');
-            if (is404 && attempt < 2) {
-              // Wait with exponential backoff before retrying
-              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
-              continue;
-            }
-            // If not 404 or last attempt, throw the error
-            throw error;
-          }
-        }
-        throw lastError || new Error('Failed to fetch backend metrics after retries');
+        // fetchBackendMetrics already has retry logic built in
+        const m = await fetchBackendMetrics(backendUploadId, effFilters);
+        set({
+          filteredTransactionCount: m.filteredTransactionCount,
+          globalMetrics: m.globalMetrics,
+          dailyTrends: m.dailyTrends,
+          analysisStage: null,
+        });
+        return;
       }
 
       await dbManager.init();
