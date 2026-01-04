@@ -282,12 +282,24 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
         pgData,
         failureReasonsData,
         dayOfWeekData,
-      amountDistributionData,
-      banksData,
-      scatterData,
-    },
-    { status: 200 }
-  );
+        amountDistributionData,
+        banksData,
+        scatterData,
+      },
+      { status: 200 }
+    );
+  } catch (e: any) {
+    const msg = String(e?.message || 'Unknown error');
+    return NextResponse.json(
+      {
+        error: 'Internal server error while computing overview breakdowns',
+        message: msg,
+        code: e?.code,
+        stack: process.env.NODE_ENV === 'development' ? e?.stack : undefined,
+      },
+      { status: 500 }
+    );
+  }
 }
 
 
