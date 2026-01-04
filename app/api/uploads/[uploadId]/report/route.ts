@@ -5,9 +5,12 @@ import * as XLSX from 'xlsx';
 import { format, parse, startOfWeek } from 'date-fns';
 import { extractUPIHandle } from '@/lib/data-normalization';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// Allow up to 5 minutes for large file processing (Vercel Pro plan max)
+export const maxDuration = 300;
 
 type ReportType = 'daily' | 'weekly' | 'monthly';
 
@@ -137,28 +140,45 @@ function addMoMChanges(rows: Record<string, any>[], groupCols: string[]): Record
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
-  const { uploadId } = await ctx.params;
-  const body = (await req.json().catch(() => null)) as ReportRequestBody | null;
-  if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  try {
+    const { uploadId } = await ctx.params;
+    const body = (await req.json().catch(() => null)) as ReportRequestBody | null;
+    if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
 
-  const { prisma } = await import('@/lib/prisma');
+    const { prisma } = await import('@/lib/prisma');
 
-  const { reportType } = body;
-  const timeCol = getTimeCol(reportType);
+    try {
+      await ensureDatabaseReady();
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+      return NextResponse.json(
+        { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+        { status: isLocked ? 503 : 500 }
+      );
+    }
 
-  const session = await prisma.uploadSession.findUnique({
-    where: { id: uploadId },
-    include: { storedFile: true },
-  });
-  if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
-  if (session.status !== 'completed' || !session.storedFile) {
-    return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
-  }
+    const { reportType } = body;
+    const timeCol = getTimeCol(reportType);
 
-  const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
-  if (!fs.existsSync(filePath)) {
-    return NextResponse.json({ error: 'Stored file missing on disk' }, { status: 500 });
-  }
+    const session = await prisma.uploadSession.findUnique({
+      where: { id: uploadId },
+      include: { storedFile: true },
+    });
+    if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
+    if (session.status !== 'completed' || !session.storedFile) {
+      return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
+    }
+
+    const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
+    if (!fs.existsSync(filePath)) {
+      return NextResponse.json({ 
+        error: 'Stored file missing on disk',
+        storagePath: session.storedFile.storagePath,
+        resolvedPath: filePath,
+        uploadId
+      }, { status: 500 });
+    }
 
   const startDate = body.filters.startDate ? new Date(body.filters.startDate) : null;
   const endDateRaw = body.filters.endDate ? new Date(body.filters.endDate) : null;
@@ -427,25 +447,37 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
     sheets.set('Failures by Paymode Monthly', rows);
   }
 
-  // Build xlsx
-  const workbook = XLSX.utils.book_new();
-  sheets.forEach((data, name) => {
-    const ws = XLSX.utils.json_to_sheet(data.length ? data : [{ Info: 'No data available' }]);
-    XLSX.utils.book_append_sheet(workbook, ws, name);
-  });
-  const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
-  const bytes = new Uint8Array(buffer);
+    // Build xlsx
+    const workbook = XLSX.utils.book_new();
+    sheets.forEach((data, name) => {
+      const ws = XLSX.utils.json_to_sheet(data.length ? data : [{ Info: 'No data available' }]);
+      XLSX.utils.book_append_sheet(workbook, ws, name);
+    });
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    const bytes = new Uint8Array(buffer);
 
-  const today = format(new Date(), 'yyyyMMdd');
-  const filename = `SR_Analysis_${reportType}_${today}.xlsx`;
-  return new NextResponse(bytes, {
-    status: 200,
-    headers: {
-      'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'content-disposition': `attachment; filename="${filename}"`,
-      'cache-control': 'no-store',
-    },
-  });
+    const today = format(new Date(), 'yyyyMMdd');
+    const filename = `SR_Analysis_${reportType}_${today}.xlsx`;
+    return new NextResponse(bytes, {
+      status: 200,
+      headers: {
+        'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'content-disposition': `attachment; filename="${filename}"`,
+        'cache-control': 'no-store',
+      },
+    });
+  } catch (e: any) {
+    const msg = String(e?.message || 'Unknown error');
+    return NextResponse.json(
+      {
+        error: 'Internal server error while generating report',
+        message: msg,
+        code: e?.code,
+        stack: process.env.NODE_ENV === 'development' ? e?.stack : undefined,
+      },
+      { status: 500 }
+    );
+  }
 }
 
 

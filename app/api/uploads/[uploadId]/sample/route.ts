@@ -72,7 +72,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
     }
 
     const url = new URL(req.url);
-    const maxRows = Math.min(Math.max(Number(url.searchParams.get('maxRows') || 100000), 1), 200000);
+    // For large files, allow up to 500k rows (was 200k). This is still a sample, not full dataset.
+    const maxRows = Math.min(Math.max(Number(url.searchParams.get('maxRows') || 100000), 1), 500000);
     const startDate = url.searchParams.get('startDate') ? new Date(String(url.searchParams.get('startDate'))) : null;
     const endDateRaw = url.searchParams.get('endDate') ? new Date(String(url.searchParams.get('endDate'))) : null;
     const endDate = endDateRaw ? new Date(endDateRaw) : null;

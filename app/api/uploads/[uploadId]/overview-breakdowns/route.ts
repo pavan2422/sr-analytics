@@ -6,9 +6,12 @@ import { calculateSR } from '@/lib/utils';
 import { getFailureLabel } from '@/lib/failure-utils';
 import { classifyUPIFlow } from '@/lib/data-normalization';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// Allow up to 5 minutes for large file processing (Vercel Pro plan max)
+export const maxDuration = 300;
 
 function parseNumber(value: any): number {
   if (value === null || value === undefined || value === '') return 0;
@@ -74,62 +77,79 @@ function toSortedBarData(map: Map<string, { total: number; success: number }>) {
 }
 
 export async function GET(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
-  const { uploadId } = await ctx.params;
-  const url = new URL(req.url);
+  try {
+    const { uploadId } = await ctx.params;
+    const url = new URL(req.url);
 
-  const { prisma } = await import('@/lib/prisma');
+    const { prisma } = await import('@/lib/prisma');
 
-  const startDate = url.searchParams.get('startDate') ? new Date(String(url.searchParams.get('startDate'))) : null;
-  const endDateRaw = url.searchParams.get('endDate') ? new Date(String(url.searchParams.get('endDate'))) : null;
-  const endDate = endDateRaw ? new Date(endDateRaw) : null;
-  if (endDate) endDate.setHours(23, 59, 59, 999);
+    try {
+      await ensureDatabaseReady();
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+      return NextResponse.json(
+        { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+        { status: isLocked ? 503 : 500 }
+      );
+    }
 
-  const paymentModeParams = url.searchParams.getAll('paymentModes').map((s) => String(s).toUpperCase().trim()).filter(Boolean);
-  const merchantIdParams = url.searchParams.getAll('merchantIds').map((s) => String(s).trim()).filter(Boolean);
-  const pgParams = url.searchParams.getAll('pgs').map((s) => String(s).trim()).filter(Boolean);
-  const bankParams = url.searchParams.getAll('banks').map((s) => String(s).trim()).filter(Boolean);
-  const cardTypeParams = url.searchParams.getAll('cardTypes').map((s) => String(s).trim()).filter(Boolean);
+    const startDate = url.searchParams.get('startDate') ? new Date(String(url.searchParams.get('startDate'))) : null;
+    const endDateRaw = url.searchParams.get('endDate') ? new Date(String(url.searchParams.get('endDate'))) : null;
+    const endDate = endDateRaw ? new Date(endDateRaw) : null;
+    if (endDate) endDate.setHours(23, 59, 59, 999);
 
-  const paymentModeSet = paymentModeParams.length ? new Set(paymentModeParams) : null;
-  const merchantIdSet = merchantIdParams.length ? new Set(merchantIdParams) : null;
-  const pgSet = pgParams.length ? new Set(pgParams) : null;
-  const bankSet = bankParams.length ? new Set(bankParams) : null;
-  const cardTypeSet = cardTypeParams.length ? new Set(cardTypeParams) : null;
+    const paymentModeParams = url.searchParams.getAll('paymentModes').map((s) => String(s).toUpperCase().trim()).filter(Boolean);
+    const merchantIdParams = url.searchParams.getAll('merchantIds').map((s) => String(s).trim()).filter(Boolean);
+    const pgParams = url.searchParams.getAll('pgs').map((s) => String(s).trim()).filter(Boolean);
+    const bankParams = url.searchParams.getAll('banks').map((s) => String(s).trim()).filter(Boolean);
+    const cardTypeParams = url.searchParams.getAll('cardTypes').map((s) => String(s).trim()).filter(Boolean);
 
-  const session = await prisma.uploadSession.findUnique({
-    where: { id: uploadId },
-    include: { storedFile: true },
-  });
-  if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
-  if (session.status !== 'completed' || !session.storedFile) {
-    return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
-  }
+    const paymentModeSet = paymentModeParams.length ? new Set(paymentModeParams) : null;
+    const merchantIdSet = merchantIdParams.length ? new Set(merchantIdParams) : null;
+    const pgSet = pgParams.length ? new Set(pgParams) : null;
+    const bankSet = bankParams.length ? new Set(bankParams) : null;
+    const cardTypeSet = cardTypeParams.length ? new Set(cardTypeParams) : null;
 
-  const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
-  if (!fs.existsSync(filePath)) {
-    return NextResponse.json({ error: 'Stored file missing on disk' }, { status: 500 });
-  }
+    const session = await prisma.uploadSession.findUnique({
+      where: { id: uploadId },
+      include: { storedFile: true },
+    });
+    if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
+    if (session.status !== 'completed' || !session.storedFile) {
+      return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
+    }
 
-  const paymentModeMap = new Map<string, { total: number; success: number }>();
-  const pgMap = new Map<string, { total: number; success: number }>();
-  const bankMap = new Map<string, { total: number; success: number }>();
-  const hourly = Array.from({ length: 24 }, () => ({ total: 0, success: 0 }));
-  const dayAgg = Array.from({ length: 7 }, () => ({ total: 0, success: 0 }));
+    const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
+    if (!fs.existsSync(filePath)) {
+      return NextResponse.json({ 
+        error: 'Stored file missing on disk',
+        storagePath: session.storedFile.storagePath,
+        resolvedPath: filePath,
+        uploadId
+      }, { status: 500 });
+    }
 
-  const failureCounts = new Map<string, number>();
+    const paymentModeMap = new Map<string, { total: number; success: number }>();
+    const pgMap = new Map<string, { total: number; success: number }>();
+    const bankMap = new Map<string, { total: number; success: number }>();
+    const hourly = Array.from({ length: 24 }, () => ({ total: 0, success: 0 }));
+    const dayAgg = Array.from({ length: 7 }, () => ({ total: 0, success: 0 }));
 
-  const amountBuckets = [
-    { name: '₹0–100', min: 0, max: 100 },
-    { name: '₹100–500', min: 100, max: 500 },
-    { name: '₹500–1K', min: 500, max: 1000 },
-    { name: '₹1K–5K', min: 1000, max: 5000 },
-    { name: '₹5K–10K', min: 5000, max: 10000 },
-    { name: '₹10K+', min: 10000, max: Infinity },
-  ];
-  const amountAgg = new Map<string, { total: number; success: number; gmv: number }>();
-  amountBuckets.forEach((b) => amountAgg.set(b.name, { total: 0, success: 0, gmv: 0 }));
+    const failureCounts = new Map<string, number>();
 
-  await new Promise<void>((resolve, reject) => {
+    const amountBuckets = [
+      { name: '₹0–100', min: 0, max: 100 },
+      { name: '₹100–500', min: 100, max: 500 },
+      { name: '₹500–1K', min: 500, max: 1000 },
+      { name: '₹1K–5K', min: 1000, max: 5000 },
+      { name: '₹5K–10K', min: 5000, max: 10000 },
+      { name: '₹10K+', min: 10000, max: Infinity },
+    ];
+    const amountAgg = new Map<string, { total: number; success: number; gmv: number }>();
+    amountBuckets.forEach((b) => amountAgg.set(b.name, { total: 0, success: 0, gmv: 0 }));
+
+    await new Promise<void>((resolve, reject) => {
     const stream = fs
       .createReadStream(filePath)
       .pipe(
@@ -255,13 +275,13 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
     sr: calculateSR(dayAgg[idx].success, dayAgg[idx].total),
   }));
 
-  return NextResponse.json(
-    {
-      paymentModeData,
-      hourlyData,
-      pgData,
-      failureReasonsData,
-      dayOfWeekData,
+    return NextResponse.json(
+      {
+        paymentModeData,
+        hourlyData,
+        pgData,
+        failureReasonsData,
+        dayOfWeekData,
       amountDistributionData,
       banksData,
       scatterData,
