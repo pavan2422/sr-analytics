@@ -9,6 +9,8 @@ import { computeFailureInsightsFromAggregates, computeInsightWindowsFromFailedRa
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// Allow up to 5 minutes for large file processing (Vercel Pro plan max)
+export const maxDuration = 300;
 
 type InsightsBody = {
   startDate: string | null;

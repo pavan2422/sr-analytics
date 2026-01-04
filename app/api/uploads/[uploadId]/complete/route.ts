@@ -16,6 +16,8 @@ import { ensureDatabaseReady } from '@/lib/server/db-ready';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// Allow up to 5 minutes for large file assembly (Vercel Pro plan max)
+export const maxDuration = 300;
 
 type CompleteBody = {
   // For safety, client should echo back the total number of parts it uploaded.

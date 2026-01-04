@@ -11,6 +11,8 @@ import type { DailyTrend, FailureRCA, GroupedMetrics } from '@/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// Allow up to 5 minutes for large file processing (Vercel Pro plan max)
+export const maxDuration = 300;
 
 type MetricsBody = {
   startDate: string | null;

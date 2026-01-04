@@ -11,6 +11,8 @@ import type { Transaction } from '@/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// Allow up to 5 minutes for large file processing (Vercel Pro plan max)
+export const maxDuration = 300;
 
 type PaymentMode = 'ALL' | 'UPI' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'PREPAID_CARD' | 'NETBANKING';
 
