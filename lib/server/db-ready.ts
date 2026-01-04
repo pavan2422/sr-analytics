@@ -27,11 +27,15 @@ function isMissingTableOrSchemaError(err: any): boolean {
 /**
  * Creates database tables directly using raw SQL.
  * This avoids needing the Prisma CLI at runtime, which doesn't work on Vercel.
+ * 
+ * Note: Prisma's $executeRawUnsafe doesn't support multiple statements in one call for SQLite,
+ * so we execute each statement separately.
  */
 async function createTablesDirectly(): Promise<void> {
-  // SQL from the migration file, with IF NOT EXISTS to be idempotent
-  // Note: SQLite uses INTEGER for BigInt values
-  const sql = `
+  // Execute each statement separately - Prisma doesn't support multiple statements in one call for SQLite
+  
+  // 1. Create StoredFile table first (no dependencies)
+  await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "StoredFile" (
         "id" TEXT NOT NULL PRIMARY KEY,
         "originalName" TEXT NOT NULL,
@@ -42,22 +46,11 @@ async function createTablesDirectly(): Promise<void> {
         "storageBackend" TEXT NOT NULL,
         "storagePath" TEXT NOT NULL,
         "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
+    )
+  `);
 
-    CREATE TABLE IF NOT EXISTS "StoredFileAnalysis" (
-        "id" TEXT NOT NULL PRIMARY KEY,
-        "status" TEXT NOT NULL,
-        "processedRows" INTEGER NOT NULL DEFAULT 0,
-        "totalRows" INTEGER,
-        "resultJson" TEXT,
-        "error" TEXT,
-        "startedAt" DATETIME,
-        "completedAt" DATETIME,
-        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        "storedFileId" TEXT NOT NULL,
-        CONSTRAINT "StoredFileAnalysis_storedFileId_fkey" FOREIGN KEY ("storedFileId") REFERENCES "StoredFile" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
-    );
-
+  // 2. Create UploadSession table (depends on StoredFile)
+  await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "UploadSession" (
         "id" TEXT NOT NULL PRIMARY KEY,
         "status" TEXT NOT NULL,
@@ -70,18 +63,33 @@ async function createTablesDirectly(): Promise<void> {
         "completedAt" DATETIME,
         "storedFileId" TEXT,
         CONSTRAINT "UploadSession_storedFileId_fkey" FOREIGN KEY ("storedFileId") REFERENCES "StoredFile" ("id") ON DELETE SET NULL ON UPDATE CASCADE
-    );
+    )
+  `);
 
-    CREATE INDEX IF NOT EXISTS "StoredFile_createdAt_idx" ON "StoredFile"("createdAt");
-    CREATE UNIQUE INDEX IF NOT EXISTS "StoredFileAnalysis_storedFileId_key" ON "StoredFileAnalysis"("storedFileId");
-    CREATE INDEX IF NOT EXISTS "StoredFileAnalysis_status_idx" ON "StoredFileAnalysis"("status");
-    CREATE INDEX IF NOT EXISTS "StoredFileAnalysis_createdAt_idx" ON "StoredFileAnalysis"("createdAt");
-    CREATE INDEX IF NOT EXISTS "UploadSession_status_idx" ON "UploadSession"("status");
-    CREATE INDEX IF NOT EXISTS "UploadSession_createdAt_idx" ON "UploadSession"("createdAt");
-  `;
+  // 3. Create StoredFileAnalysis table (depends on StoredFile)
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "StoredFileAnalysis" (
+        "id" TEXT NOT NULL PRIMARY KEY,
+        "status" TEXT NOT NULL,
+        "processedRows" INTEGER NOT NULL DEFAULT 0,
+        "totalRows" INTEGER,
+        "resultJson" TEXT,
+        "error" TEXT,
+        "startedAt" DATETIME,
+        "completedAt" DATETIME,
+        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "storedFileId" TEXT NOT NULL,
+        CONSTRAINT "StoredFileAnalysis_storedFileId_fkey" FOREIGN KEY ("storedFileId") REFERENCES "StoredFile" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
+    )
+  `);
 
-  // Execute the SQL using Prisma's $executeRawUnsafe
-  await prisma.$executeRawUnsafe(sql);
+  // 4. Create indexes
+  await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "StoredFile_createdAt_idx" ON "StoredFile"("createdAt")`);
+  await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "StoredFileAnalysis_storedFileId_key" ON "StoredFileAnalysis"("storedFileId")`);
+  await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "StoredFileAnalysis_status_idx" ON "StoredFileAnalysis"("status")`);
+  await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "StoredFileAnalysis_createdAt_idx" ON "StoredFileAnalysis"("createdAt")`);
+  await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "UploadSession_status_idx" ON "UploadSession"("status")`);
+  await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "UploadSession_createdAt_idx" ON "UploadSession"("createdAt")`);
 }
 
 /**
@@ -133,7 +141,16 @@ export async function ensureDatabaseReady(): Promise<void> {
 
       // Tables are missing - create them directly using raw SQL
       // This avoids needing Prisma CLI which doesn't work on Vercel
-      await createTablesDirectly();
+      try {
+        await createTablesDirectly();
+      } catch (createErr: any) {
+        // If table creation fails, throw a more helpful error
+        throw new Error(
+          `Failed to create database tables: ${createErr?.message || 'Unknown error'}. ` +
+          `Original error: ${err?.message || 'Unknown'}`,
+          { cause: createErr }
+        );
+      }
       
       // Verify tables were created by trying the query again
       await prisma.uploadSession.findFirst({ select: { id: true } });
