@@ -35,6 +35,17 @@ export function FileInfo() {
           alert('Please upload a CSV or XLSX file');
           return;
         }
+
+        // Block XLSX for large files (>100MB) - must use CSV
+        const fileSizeMB = file.size / 1024 / 1024;
+        if ((extension === 'xlsx' || extension === 'xls') && fileSizeMB > 100) {
+          alert(
+            'Large files (>100MB) must be uploaded as CSV format.\n\n' +
+              'XLSX files are loaded fully into memory and will cause crashes.\n\n' +
+              'Please export your data as CSV and try again.'
+          );
+          return;
+        }
         
         try {
           await loadDataFromFile(file);
@@ -60,6 +71,17 @@ export function FileInfo() {
         
         if (!extension || !validExtensions.includes(extension)) {
           alert('Please upload a CSV or XLSX file');
+          return;
+        }
+
+        // Block XLSX for large files (>100MB) - must use CSV
+        const fileSizeMB = file.size / 1024 / 1024;
+        if ((extension === 'xlsx' || extension === 'xls') && fileSizeMB > 100) {
+          alert(
+            'Large files (>100MB) must be uploaded as CSV format.\n\n' +
+              'XLSX files are loaded fully into memory and will cause crashes.\n\n' +
+              'Please export your data as CSV and try again.'
+          );
           return;
         }
         

@@ -184,3 +184,4 @@ for (let part = 1; part <= expectedParts; part++) {
 - Upload: 0-90% (chunk uploads)
 - Processing: 90-100% (server-side analysis)
 
+

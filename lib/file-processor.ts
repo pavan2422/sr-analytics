@@ -29,7 +29,6 @@ export async function streamCSVFile(
     // For very large files (>500MB), use smaller chunks to prevent memory issues
     const isVeryLargeFile = fileSize > 500 * 1024 * 1024;
     const maxRowsInMemory = isVeryLargeFile ? 200000 : Infinity;
-    let shouldPause = false;
     
     onProgress({
       processed: 0,
@@ -44,12 +43,31 @@ export async function streamCSVFile(
       skipEmptyLines: true,
       transformHeader: (header) => header.trim().toLowerCase(),
       chunk: (chunkResults, parser) => {
+        // Pause to allow yielding/backpressure safely when we do async-ish work below.
+        try {
+          parser?.pause?.();
+        } catch {
+          // ignore
+        }
+
         // Process chunk
         const chunkData = chunkResults.data as any[];
         
         // Always add the chunk data
         results.push(...chunkData);
         processedRows += chunkData.length;
+
+        // Safety guard: never let this helper accidentally buffer a 1GB+ file into memory.
+        // Callers that need large-file support should stream to IndexedDB or use backend upload.
+        if (results.length > maxRowsInMemory) {
+          try {
+            parser?.abort?.();
+          } catch {
+            // ignore
+          }
+          reject(new Error('File is too large to load into memory. Please use the large-file upload path (backend/IndexedDB).'));
+          return;
+        }
         
       // For very large files (5GB+), yield more frequently and longer to prevent blocking
       // This prevents the browser from freezing during parsing
@@ -73,7 +91,11 @@ export async function streamCSVFile(
         
         // Yield to browser to prevent blocking (longer delay for very large files)
         setTimeout(() => {
-          parser.resume();
+          try {
+            parser?.resume?.();
+          } catch {
+            // ignore
+          }
         }, yieldDelay);
       },
       complete: () => {

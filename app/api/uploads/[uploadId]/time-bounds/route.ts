@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import fs from 'node:fs';
 import csvParser from 'csv-parser';
 import { parse } from 'date-fns';
-import { normalizeData } from '@/lib/data-normalization';
+import { prisma } from '@/lib/prisma';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
 
 export const runtime = 'nodejs';
@@ -54,10 +54,8 @@ function classifyUPIFlow(bankname: string | undefined): string {
 
 export async function GET(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
   const { uploadId } = await ctx.params;
-  const { prisma } = await import('@/lib/prisma');
-
   const url = new URL(req.url);
-  const maxRows = Math.min(Math.max(Number(url.searchParams.get('maxRows') || 100000), 1), 200000);
+
   const startDate = url.searchParams.get('startDate') ? new Date(String(url.searchParams.get('startDate'))) : null;
   const endDateRaw = url.searchParams.get('endDate') ? new Date(String(url.searchParams.get('endDate'))) : null;
   const endDate = endDateRaw ? new Date(endDateRaw) : null;
@@ -79,7 +77,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
     where: { id: uploadId },
     include: { storedFile: true },
   });
-
   if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
   if (session.status !== 'completed' || !session.storedFile) {
     return NextResponse.json({ error: 'Upload not completed yet' }, { status: 409 });
@@ -90,9 +87,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
     return NextResponse.json({ error: 'Stored file missing on disk' }, { status: 500 });
   }
 
-  // Note: this endpoint is intentionally "sample only" to keep response times safe.
-  // Full multi-GB analytics should be done server-side via ingestion + aggregation.
-  const rows: any[] = [];
+  let minMs: number | null = null;
+  let maxMs: number | null = null;
 
   await new Promise<void>((resolve, reject) => {
     const stream = fs
@@ -104,49 +100,43 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
         })
       );
 
-    stream.on('data', (data) => {
-      if (startDate || endDate || paymentModeSet || merchantIdSet || pgSet || bankSet || cardTypeSet) {
-        const pm = data?.paymentmode ? String(data.paymentmode).toUpperCase().trim() : '';
-        const mid = data?.merchantid ? String(data.merchantid).trim() : '';
-        const pg = String(data?.pg || '').trim();
-        const bankname = String(data?.bankname || '').trim();
-        const cardtype = String(data?.cardtype || '').trim();
-        const txtime = parseDate(data?.txtime);
-        if (!txtime) return;
+    stream.on('data', (row: any) => {
+      const pm = row?.paymentmode ? String(row.paymentmode).toUpperCase().trim() : '';
+      const mid = row?.merchantid ? String(row.merchantid).trim() : '';
+      const pg = String(row?.pg || '').trim();
+      const bankname = String(row?.bankname || '').trim();
+      const cardtype = String(row?.cardtype || '').trim();
+      const txtime = parseDate(row?.txtime);
+      if (!txtime) return;
+      const ms = txtime.getTime();
 
-        if (startDate && txtime < startDate) return;
-        if (endDate && txtime > endDate) return;
-        if (paymentModeSet && !paymentModeSet.has(pm)) return;
-        if (merchantIdSet && !merchantIdSet.has(mid)) return;
-        if (pgSet && !pgSet.has(pg)) return;
-        if (bankSet) {
-          const flow = classifyUPIFlow(bankname);
-          if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
-        }
-        if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
+      if (startDate && txtime < startDate) return;
+      if (endDate && txtime > endDate) return;
+      if (paymentModeSet && !paymentModeSet.has(pm)) return;
+      if (merchantIdSet && !merchantIdSet.has(mid)) return;
+      if (pgSet && !pgSet.has(pg)) return;
+      if (bankSet) {
+        const flow = classifyUPIFlow(bankname);
+        if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
       }
+      if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
 
-      rows.push(data);
-      if (rows.length >= maxRows) {
-        // Stop early once we have the sample.
-        stream.destroy();
-      }
+      if (minMs === null || ms < minMs) minMs = ms;
+      if (maxMs === null || ms > maxMs) maxMs = ms;
     });
+
     stream.on('error', (err) => reject(err));
     stream.on('end', () => resolve());
     stream.on('close', () => resolve());
   });
 
-  const transactions = normalizeData(rows);
-
-  return NextResponse.json({
-    uploadId,
-    storedFileId: session.storedFile.id,
-    sampled: true,
-    maxRows,
-    transactions,
-  });
+  return NextResponse.json(
+    {
+      min: minMs === null ? undefined : new Date(minMs).toISOString(),
+      max: maxMs === null ? undefined : new Date(maxMs).toISOString(),
+    },
+    { status: 200 }
+  );
 }
-
 
 

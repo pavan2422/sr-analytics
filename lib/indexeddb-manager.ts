@@ -221,7 +221,20 @@ class IndexedDBTransactionManager implements DBManager {
         const transaction = this.db!.transaction([STORE_NAME], 'readwrite');
         const store = transaction.objectStore(STORE_NAME);
 
-        transaction.onerror = () => reject(transaction.error);
+        transaction.onerror = () => {
+          const error = transaction.error;
+          // Check for quota exceeded errors
+          if (error && (
+            error.name === 'QuotaExceededError' ||
+            error.message?.toLowerCase().includes('quota') ||
+            error.message?.toLowerCase().includes('exceeded') ||
+            error.message?.toLowerCase().includes('storage')
+          )) {
+            reject(new Error(`Browser storage quota exceeded. Please free up disk space or use a different browser. Original error: ${error.message || error.name}`));
+          } else {
+            reject(error || new Error('IndexedDB transaction failed'));
+          }
+        };
         transaction.oncomplete = () => resolve();
 
         chunk.forEach((tx) => {
