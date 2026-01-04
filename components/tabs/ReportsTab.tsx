@@ -62,8 +62,10 @@ export function ReportsTab() {
   }, [filteredTransactions, selectedPaymentModes, isLargeFile, sample]);
 
   const canGenerate = useMemo(() => {
-    return !isLargeFile && reportTransactions.length > 0;
-  }, [reportTransactions.length, isLargeFile]);
+    // Large-file mode can still generate a report, but it's based on a bounded sample
+    // (we do not keep the full filtered set in memory/IndexedDB in this tab).
+    return reportTransactions.length > 0;
+  }, [reportTransactions.length]);
 
   const handleGenerateReport = useCallback(async () => {
     if (!canGenerate) return;
@@ -92,7 +94,8 @@ export function ReportsTab() {
         {isLargeFile && (
           <div className="mb-6 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
             <p className="text-sm text-yellow-800 dark:text-yellow-200">
-              Reports are not available for very large files. Please use smaller datasets for report generation.
+              You uploaded a large file. Reports will be generated from a bounded sample (up to 50,000 transactions),
+              so totals may differ slightly from the full dataset.
             </p>
           </div>
         )}
