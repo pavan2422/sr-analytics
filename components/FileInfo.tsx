@@ -49,9 +49,10 @@ export function FileInfo() {
         
         try {
           await loadDataFromFile(file);
-        } catch (err) {
+        } catch (err: any) {
           console.error('Error loading file:', err);
-          alert('Failed to load file. Please check the console for details.');
+          const errorMessage = err?.message || err?.toString() || 'Unknown error occurred';
+          alert(`Failed to load file: ${errorMessage}`);
         }
       }
       // Reset input so the same file can be selected again

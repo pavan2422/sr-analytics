@@ -80,7 +80,25 @@ export async function uploadFileInChunks(
       }),
       signal: opts?.signal,
     });
-    if (!initRes.ok) throw new Error(`Upload init failed (${initRes.status})`);
+    if (!initRes.ok) {
+      let errorMsg = `Upload init failed (${initRes.status})`;
+      try {
+        const errorJson = await initRes.json();
+        errorMsg = errorJson.error || errorJson.message || errorMsg;
+        if (errorJson.message) {
+          errorMsg += `: ${errorJson.message}`;
+        }
+      } catch {
+        // If JSON parsing fails, try text
+        try {
+          const errorText = await initRes.text();
+          if (errorText) errorMsg += `: ${errorText}`;
+        } catch {
+          // Ignore if text parsing also fails
+        }
+      }
+      throw new Error(errorMsg);
+    }
     const initJson = (await initRes.json()) as InitResponse;
     uploadId = initJson.uploadId;
     expectedParts = initJson.expectedParts;
@@ -114,8 +132,22 @@ export async function uploadFileInChunks(
         signal: opts?.signal,
       });
       if (!partRes.ok) {
-        const msg = await partRes.text().catch(() => '');
-        throw new Error(`Upload chunk ${part}/${expectedParts} failed (${partRes.status}): ${msg}`);
+        let errorMsg = `Upload chunk ${part}/${expectedParts} failed (${partRes.status})`;
+        try {
+          const errorJson = await partRes.json();
+          errorMsg = errorJson.error || errorJson.message || errorMsg;
+          if (errorJson.message) {
+            errorMsg += `: ${errorJson.message}`;
+          }
+        } catch {
+          try {
+            const errorText = await partRes.text();
+            if (errorText) errorMsg += `: ${errorText}`;
+          } catch {
+            // Ignore if parsing fails
+          }
+        }
+        throw new Error(errorMsg);
       }
 
       uploaded += blob.size;
@@ -141,8 +173,22 @@ export async function uploadFileInChunks(
     signal: opts?.signal,
   });
   if (!completeRes.ok) {
-    const msg = await completeRes.text().catch(() => '');
-    throw new Error(`Upload finalize failed (${completeRes.status}): ${msg}`);
+    let errorMsg = `Upload finalize failed (${completeRes.status})`;
+    try {
+      const errorJson = await completeRes.json();
+      errorMsg = errorJson.error || errorJson.message || errorMsg;
+      if (errorJson.message) {
+        errorMsg += `: ${errorJson.message}`;
+      }
+    } catch {
+      try {
+        const errorText = await completeRes.text();
+        if (errorText) errorMsg += `: ${errorText}`;
+      } catch {
+        // Ignore if parsing fails
+      }
+    }
+    throw new Error(errorMsg);
   }
 
   const completeJson = (await completeRes.json()) as CompleteResponse;
