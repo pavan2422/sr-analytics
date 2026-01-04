@@ -12,6 +12,7 @@ import {
   listReceivedParts,
   resolveStoredFileAbsolutePath,
 } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -24,6 +25,18 @@ type CompleteBody = {
 export async function POST(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
   const { uploadId } = await ctx.params;
   const { prisma } = await import('@/lib/prisma');
+
+  try {
+    await ensureDatabaseReady();
+  } catch (e: any) {
+    const msg = String(e?.message || '');
+    const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+    return NextResponse.json(
+      { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+      { status: isLocked ? 503 : 500 }
+    );
+  }
+
   const session = await prisma.uploadSession.findUnique({ where: { id: uploadId } });
   if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
   if (session.status === 'completed') {
@@ -50,7 +63,14 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
     );
   }
 
-  ensureUploadDirs();
+  try {
+    ensureUploadDirs();
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: 'Failed to create upload directories', uploadId, code: e?.code, path: e?.path, message: e?.message },
+      { status: 500 }
+    );
+  }
 
   // Create StoredFile metadata first so we can use its ID in the final filename.
   const storedFile = await prisma.storedFile.create({

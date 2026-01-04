@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { ensureUploadDirs, ensureUploadSessionTmpDir, getPartPath } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -13,6 +14,17 @@ export async function PUT(req: Request, ctx: { params: Promise<{ uploadId: strin
   const partNumber = Number(partNumberStr);
   if (!Number.isFinite(partNumber) || partNumber < 1) {
     return NextResponse.json({ error: 'Invalid partNumber' }, { status: 400 });
+  }
+
+  try {
+    await ensureDatabaseReady();
+  } catch (e: any) {
+    const msg = String(e?.message || '');
+    const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+    return NextResponse.json(
+      { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+      { status: isLocked ? 503 : 500 }
+    );
   }
 
   const session = await prisma.uploadSession.findUnique({ where: { id: uploadId } });
@@ -41,8 +53,15 @@ export async function PUT(req: Request, ctx: { params: Promise<{ uploadId: strin
     );
   }
 
-  ensureUploadDirs();
-  ensureUploadSessionTmpDir(uploadId);
+  try {
+    ensureUploadDirs();
+    ensureUploadSessionTmpDir(uploadId);
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: 'Failed to prepare upload directories', uploadId, code: e?.code, path: e?.path, message: e?.message },
+      { status: 500 }
+    );
+  }
   const partPath = getPartPath(uploadId, partNumber);
 
   // Idempotency: if client retries a part, accept only if size matches.

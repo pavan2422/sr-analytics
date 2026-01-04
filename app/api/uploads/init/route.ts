@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import crypto from 'node:crypto';
 import { ensureUploadDirs, ensureUploadSessionTmpDir } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -31,21 +32,63 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'chunkSizeBytes must be between 1MB and 128MB' }, { status: 400 });
   }
 
-  ensureUploadDirs();
-  const uploadId = crypto.randomUUID();
-  ensureUploadSessionTmpDir(uploadId);
+  try {
+    ensureUploadDirs();
+  } catch (e: any) {
+    return NextResponse.json(
+      {
+        error: 'Failed to create upload directories',
+        code: e?.code,
+        path: e?.path,
+        message: e?.message,
+      },
+      { status: 500 }
+    );
+  }
 
-  await prisma.uploadSession.create({
-    data: {
-      id: uploadId,
-      status: 'initiated',
-      originalName,
-      contentType,
-      sizeBytes: BigInt(sizeBytes),
-      chunkSizeBytes,
-      receivedBytes: BigInt(0),
-    },
-  });
+  const uploadId = crypto.randomUUID();
+  try {
+    ensureUploadSessionTmpDir(uploadId);
+  } catch (e: any) {
+    return NextResponse.json(
+      {
+        error: 'Failed to create upload temp directory',
+        uploadId,
+        code: e?.code,
+        path: e?.path,
+        message: e?.message,
+      },
+      { status: 500 }
+    );
+  }
+
+  try {
+    await ensureDatabaseReady();
+    await prisma.uploadSession.create({
+      data: {
+        id: uploadId,
+        status: 'initiated',
+        originalName,
+        contentType,
+        sizeBytes: BigInt(sizeBytes),
+        chunkSizeBytes,
+        receivedBytes: BigInt(0),
+      },
+    });
+  } catch (e: any) {
+    const msg = String(e?.message || '');
+    const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+    const status = isLocked ? 503 : 500;
+    return NextResponse.json(
+      {
+        error: isLocked ? 'Database is locked. Please retry.' : 'Failed to initialize upload session',
+        uploadId,
+        prismaCode: e?.code,
+        message: msg || undefined,
+      },
+      { status }
+    );
+  }
 
   return NextResponse.json({
     uploadId,

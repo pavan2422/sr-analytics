@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
 import { getUploadSessionTmpDir, listReceivedParts } from '@/lib/server/storage';
+import { ensureDatabaseReady } from '@/lib/server/db-ready';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -8,6 +9,18 @@ export const dynamic = 'force-dynamic';
 export async function GET(_req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
   const { uploadId } = await ctx.params;
   const { prisma } = await import('@/lib/prisma');
+
+  try {
+    await ensureDatabaseReady();
+  } catch (e: any) {
+    const msg = String(e?.message || '');
+    const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+    return NextResponse.json(
+      { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+      { status: isLocked ? 503 : 500 }
+    );
+  }
+
   const session = await prisma.uploadSession.findUnique({
     where: { id: uploadId },
     include: { storedFile: true },
@@ -47,6 +60,18 @@ export async function GET(_req: Request, ctx: { params: Promise<{ uploadId: stri
 export async function DELETE(_req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
   const { uploadId } = await ctx.params;
   const { prisma } = await import('@/lib/prisma');
+
+  try {
+    await ensureDatabaseReady();
+  } catch (e: any) {
+    const msg = String(e?.message || '');
+    const isLocked = msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
+    return NextResponse.json(
+      { error: isLocked ? 'Database is locked. Please retry.' : 'Database not ready', prismaCode: e?.code, message: msg },
+      { status: isLocked ? 503 : 500 }
+    );
+  }
+
   const session = await prisma.uploadSession.findUnique({ where: { id: uploadId } });
   if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
 
