@@ -43,7 +43,16 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
     return NextResponse.json({ ok: true, uploadId, storedFileId: session.storedFileId }, { status: 200 });
   }
 
-  const body = (await req.json().catch(() => ({}))) as CompleteBody;
+  // Parse JSON body with clear error handling (body is optional, but if present must be valid JSON)
+  let body: CompleteBody = {};
+  try {
+    const text = await req.text();
+    if (text.trim()) {
+      body = JSON.parse(text) as CompleteBody;
+    }
+  } catch (e: any) {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
   const sizeBytes = Number(session.sizeBytes);
   const chunkSizeBytes = session.chunkSizeBytes;
   const expectedParts = Math.ceil(sizeBytes / chunkSizeBytes);
