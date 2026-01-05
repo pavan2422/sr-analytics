@@ -113,7 +113,7 @@ export function ReportsTab() {
             throw new Error(`Failed to generate backend report (${r.status}): ${msg}`);
           }
           return r;
-        });
+        }, 5, undefined, backendUploadId);
 
         const blob = await res.blob();
         const cd = res.headers.get('content-disposition') || '';
