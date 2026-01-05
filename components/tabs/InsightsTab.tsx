@@ -12,9 +12,6 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 export function InsightsTab() {
   const filteredTransactions = useStore((state) => state.filteredTransactions);
   const useIndexedDB = useStore((state) => state._useIndexedDB);
-  const useBackend = useStore((state) => state._useBackend);
-  const backendUploadId = useStore((state) => state.backendUploadId);
-  const filters = useStore((state) => state.filters);
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const streamFilteredTransactions = useStore((state) => state.streamFilteredTransactions);
   const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
@@ -39,37 +36,6 @@ export function InsightsTab() {
     const timeoutId = setTimeout(async () => {
       try {
         if (useIndexedDB) {
-          // Backend mode: compute insights server-side from the full stored CSV (no sampling).
-          if (useBackend) {
-            if (!backendUploadId) throw new Error('Missing backend upload id');
-            const { retryApiCall } = await import('@/lib/retry-api');
-            const res = await retryApiCall(async () => {
-              const r = await fetch(`/api/uploads/${backendUploadId}/insights`, {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({
-                  startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
-                  endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
-                  paymentModes: filters.paymentModes || [],
-                  merchantIds: filters.merchantIds || [],
-                  pgs: filters.pgs || [],
-                  banks: filters.banks || [],
-                  cardTypes: filters.cardTypes || [],
-                }),
-              });
-              if (!r.ok) {
-                const msg = await r.text().catch(() => '');
-                throw new Error(`Failed to compute backend insights (${r.status}): ${msg}`);
-              }
-              return r;
-            }, 5, undefined, backendUploadId);
-            const json = (await res.json()) as { insights: FailureInsight[] };
-            setInsights(json.insights || []);
-            setCurrentPage(1);
-            setIsGeneratingInsights(false);
-            return;
-          }
-
           // For large datasets (5GB+), stream and process in batches - DON'T accumulate all
           console.log(`Streaming ${filteredTransactionCount} transactions from IndexedDB for insights...`);
           
@@ -140,7 +106,7 @@ export function InsightsTab() {
     }, 500); // Longer debounce for large files (5GB+)
 
     return () => clearTimeout(timeoutId);
-  }, [filteredTransactions, useIndexedDB, useBackend, backendUploadId, filteredTransactionCount, streamFilteredTransactions, getSampleFilteredTransactions, filters]);
+  }, [filteredTransactions, useIndexedDB, filteredTransactionCount, streamFilteredTransactions, getSampleFilteredTransactions]);
 
   // Get unique payment modes for filter
   const paymentModes = useMemo(() => {
@@ -270,11 +236,8 @@ export function InsightsTab() {
           <p className="text-muted-foreground">
             Generating insights from {(useIndexedDB ? filteredTransactionCount : filteredTransactions.length).toLocaleString()} transactions...
           </p>
-          {useIndexedDB && !useBackend && (
+          {useIndexedDB && (
             <p className="text-xs text-muted-foreground mt-2">Streaming from IndexedDB (this may take a few minutes for large files)</p>
-          )}
-          {useIndexedDB && useBackend && (
-            <p className="text-xs text-muted-foreground mt-2">Computing insights from the full dataset on the server…</p>
           )}
         </div>
       </div>
@@ -311,15 +274,6 @@ export function InsightsTab() {
             <span className="text-sm text-muted-foreground">Auto-Generated</span>
           </div>
         </div>
-
-        {useBackend && (
-          <div className="mt-4 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
-            <p className="text-sm text-yellow-800 dark:text-yellow-200">
-              Insights are computed from the full dataset on the server for large backend uploads. This can take a bit longer,
-              but ensures no patterns are missed.
-            </p>
-          </div>
-        )}
 
         {/* Summary KPIs */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

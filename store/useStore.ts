@@ -8,7 +8,6 @@ import { indexedDBStorage } from './indexedDBStorage';
 import { streamCSVFile, processExcelFile, ProcessingProgress } from '@/lib/file-processor';
 import { WorkerManager } from '@/lib/worker-manager';
 import { dbManager } from '@/lib/indexeddb-manager';
-import { uploadFileInChunks } from '@/lib/upload-client';
 
 interface StoreState {
   // Raw data metadata (not full transactions for large files)
@@ -20,11 +19,8 @@ interface StoreState {
   fileSizes: number[];
   isSampledDataset: boolean; // True when we sampled a huge file instead of ingesting everything
   sampledFromBytes: number; // Original file size when sampling
-  backendUploadId: string | null; // When using backend upload (multi-GB safe)
-  backendStoredFileId: string | null; // StoredFile.id in Prisma (metadata + path)
   _skipPersistence: boolean; // Internal flag to skip persistence during large loads
   _useIndexedDB: boolean; // Flag to use IndexedDB instead of memory
-  _useBackend: boolean; // Flag to use backend (server-side) instead of IndexedDB for large files
   progress: ProcessingProgress | null; // Progress tracking for large files
   hasHydrated: boolean; // True after Zustand persist rehydration completes
   analysisStage: 'FILTERING' | 'COMPUTING' | null; // UI hint for post-upload analysis work
@@ -80,112 +76,6 @@ const defaultFilters: FilterState = {
 
 // Worker manager instances (shared across store)
 const workerManager = new WorkerManager();
-
-import { retryApiCall } from '@/lib/retry-api';
-
-async function fetchBackendSample(uploadId: string, maxRows: number) {
-  return retryApiCall(async () => {
-    const res = await fetch(`/api/uploads/${uploadId}/sample?maxRows=${maxRows}`);
-    if (!res.ok) {
-      const msg = await res.text().catch(() => '');
-      throw new Error(`Failed to fetch sample from backend (${res.status}): ${msg}`);
-    }
-    const json = (await res.json()) as { transactions: Transaction[]; storedFileId: string };
-    return json;
-  }, 5, undefined, uploadId); // Pass uploadId to wait for session readiness
-}
-
-function buildBackendFilterQuery(filters: {
-  startDate?: Date;
-  endDate?: Date;
-  paymentModes?: string[];
-  merchantIds?: string[];
-  pgs?: string[];
-  banks?: string[];
-  cardTypes?: string[];
-}) {
-  const params = new URLSearchParams();
-  if (filters.startDate) params.set('startDate', filters.startDate.toISOString());
-  if (filters.endDate) params.set('endDate', filters.endDate.toISOString());
-  for (const pm of filters.paymentModes || []) params.append('paymentModes', pm);
-  for (const id of filters.merchantIds || []) params.append('merchantIds', id);
-  for (const pg of filters.pgs || []) params.append('pgs', pg);
-  for (const b of filters.banks || []) params.append('banks', b);
-  for (const ct of filters.cardTypes || []) params.append('cardTypes', ct);
-  return params;
-}
-
-async function fetchBackendSampleFiltered(
-  uploadId: string,
-  maxRows: number,
-  filters: Parameters<typeof buildBackendFilterQuery>[0]
-) {
-  return retryApiCall(async () => {
-    const params = buildBackendFilterQuery(filters);
-    params.set('maxRows', String(maxRows));
-    const res = await fetch(`/api/uploads/${uploadId}/sample?${params.toString()}`);
-    if (!res.ok) {
-      const msg = await res.text().catch(() => '');
-      throw new Error(`Failed to fetch filtered sample from backend (${res.status}): ${msg}`);
-    }
-    const json = (await res.json()) as { transactions: Transaction[]; storedFileId: string };
-    return json;
-  }, 5, undefined, uploadId); // Pass uploadId to wait for session readiness
-}
-
-async function fetchBackendMetrics(uploadId: string, filters: Parameters<typeof buildBackendFilterQuery>[0]) {
-  return retryApiCall(async () => {
-    const res = await fetch(`/api/uploads/${uploadId}/metrics`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        startDate: filters.startDate ? filters.startDate.toISOString() : null,
-        endDate: filters.endDate ? filters.endDate.toISOString() : null,
-        paymentModes: filters.paymentModes || [],
-        merchantIds: filters.merchantIds || [],
-        pgs: filters.pgs || [],
-        banks: filters.banks || [],
-        cardTypes: filters.cardTypes || [],
-      }),
-    });
-    if (!res.ok) {
-      const msg = await res.text().catch(() => '');
-      throw new Error(`Failed to compute backend metrics (${res.status}): ${msg}`);
-    }
-    return (await res.json()) as {
-      filteredTransactionCount: number;
-      globalMetrics: Metrics;
-      dailyTrends: DailyTrend[];
-    };
-  }, 5, undefined, uploadId); // Pass uploadId to wait for session readiness
-}
-
-async function fetchBackendFilterOptions(uploadId: string) {
-  return retryApiCall(async () => {
-    const res = await fetch(`/api/uploads/${uploadId}/filter-options`, { method: 'GET' });
-    if (!res.ok) {
-      const msg = await res.text().catch(() => '');
-      throw new Error(`Failed to load filter options from backend (${res.status}): ${msg}`);
-    }
-    return (await res.json()) as { paymentModes: string[]; merchantIds: string[]; truncated?: boolean };
-  }, 5, undefined, uploadId); // Pass uploadId to wait for session readiness
-}
-
-async function fetchBackendTimeBounds(uploadId: string, filters: Parameters<typeof buildBackendFilterQuery>[0]) {
-  return retryApiCall(async () => {
-    const params = buildBackendFilterQuery(filters);
-    const res = await fetch(`/api/uploads/${uploadId}/time-bounds?${params.toString()}`, { method: 'GET' });
-    if (!res.ok) {
-      const msg = await res.text().catch(() => '');
-      throw new Error(`Failed to load time bounds from backend (${res.status}): ${msg}`);
-    }
-    const json = (await res.json()) as { min?: string; max?: string };
-    return {
-      min: json.min ? new Date(json.min) : undefined,
-      max: json.max ? new Date(json.max) : undefined,
-    };
-  }, 5, undefined, uploadId); // Pass uploadId to wait for session readiness
-}
 
 // Stream a HUGE CSV but stop after a fixed number of rows (sample mode).
 async function streamCSVSampleToMemory(
@@ -519,11 +409,8 @@ export const useStore = create<StoreState>()(
       fileSizes: [],
       isSampledDataset: false,
       sampledFromBytes: 0,
-      backendUploadId: null,
-      backendStoredFileId: null,
       _skipPersistence: false,
       _useIndexedDB: false,
-      _useBackend: false,
       progress: null,
       hasHydrated: false,
       analysisStage: null,
@@ -549,9 +436,6 @@ export const useStore = create<StoreState>()(
         }
 
         // For large datasets, stream from IndexedDB
-        if (get()._useBackend) {
-          throw new Error('Streaming full filtered transactions is not supported in backend mode yet. Use sampling APIs instead.');
-        }
         await dbManager.init();
         await dbManager.streamTransactions(
           onChunk,
@@ -569,7 +453,7 @@ export const useStore = create<StoreState>()(
       },
 
       getSampleFilteredTransactions: async (maxRows = 50000, overrides) => {
-        const { filters, _useBackend, backendUploadId } = get();
+        const { filters } = get();
         const eff = {
           startDate: overrides?.startDate ?? filters.dateRange.start ?? undefined,
           endDate: overrides?.endDate ?? filters.dateRange.end ?? undefined,
@@ -580,26 +464,11 @@ export const useStore = create<StoreState>()(
           cardTypes: overrides?.cardTypes ?? (filters.cardTypes.length > 0 ? filters.cardTypes : undefined),
         };
 
-        if (_useBackend) {
-          if (!backendUploadId) throw new Error('Missing backend upload id');
-          const json = await fetchBackendSampleFiltered(backendUploadId, maxRows, eff);
-          return json.transactions;
-        }
-
         await dbManager.init();
         return dbManager.sampleTransactions(maxRows, eff);
       },
 
       getIndexedDBFilterOptions: async () => {
-        const { _useBackend, backendUploadId } = get();
-        if (_useBackend) {
-          if (!backendUploadId) throw new Error('Missing backend upload id');
-          const opts = await fetchBackendFilterOptions(backendUploadId);
-          return {
-            paymentModes: (opts.paymentModes || []).filter(Boolean).sort(),
-            merchantIds: (opts.merchantIds || []).map((v) => String(v || '').trim()).filter(Boolean).sort(),
-          };
-        }
         await dbManager.init();
         const [paymentModes, merchantIds] = await Promise.all([
           dbManager.getDistinctIndexValues('paymentmode'),
@@ -612,7 +481,7 @@ export const useStore = create<StoreState>()(
       },
 
       getFilteredTimeBounds: async () => {
-        const { filters, _useBackend, backendUploadId } = get();
+        const { filters } = get();
         const eff = {
           startDate: filters.dateRange.start || undefined,
           endDate: filters.dateRange.end || undefined,
@@ -622,10 +491,6 @@ export const useStore = create<StoreState>()(
           banks: filters.banks.length > 0 ? filters.banks : undefined,
           cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
         };
-        if (_useBackend) {
-          if (!backendUploadId) throw new Error('Missing backend upload id');
-          return fetchBackendTimeBounds(backendUploadId, eff);
-        }
         await dbManager.init();
         return dbManager.getFilteredTimeBounds(eff);
       },
@@ -647,200 +512,20 @@ export const useStore = create<StoreState>()(
 
           const fileExtension = file.name.split('.').pop()?.toLowerCase();
 
-          // Large-file strategy:
-          // - On Vercel/serverless, backend chunk uploads store parts on local disk which is NOT shared
-          //   across instances → finalize can fail with "Missing parts".
-          // - Default is to use IndexedDB streaming for large files (browser-local, reliable on Vercel).
-          // - Backend chunked upload can be re-enabled only if the backend has shared/persistent storage
-          //   (S3/R2/Vercel Blob/etc). Gate it behind NEXT_PUBLIC_ENABLE_BACKEND_UPLOAD=true.
-          const enableBackendUpload = process.env.NEXT_PUBLIC_ENABLE_BACKEND_UPLOAD === 'true';
-          const backendUploadThresholdBytes = 100 * 1024 * 1024; // 100MB
-          // Removed size limit - IndexedDB can handle very large files (2GB+)
-          // Browser quota limits will be handled gracefully with error messages
-          const shouldUseBackendUpload = enableBackendUpload && fileExtension === 'csv' && file.size >= backendUploadThresholdBytes;
-
-          // For files > 100MB, use IndexedDB streaming mode
-          const useIndexedDBMode = !shouldUseBackendUpload && (file.size > 100 * 1024 * 1024 || fileSizeMB > 100);
+          // IndexedDB-only:
+          // - For files > 100MB: stream into IndexedDB (Chrome can handle this reliably without holding data in memory)
+          // - For smaller files: keep previous behavior (load into memory for faster interactions)
+          const useIndexedDBMode = file.size > 100 * 1024 * 1024 || fileSizeMB > 100;
           let totalRows = 0;
 
           const progressCallback = (progress: ProcessingProgress) => {
             set({ progress });
           };
 
-          if (shouldUseBackendUpload) {
-            // For CSVs >= 100MB: use backend mode (upload + server-side metrics/sampling).
-            // This avoids browser storage/quota issues entirely.
-            const maxSampleRows = 100000;
-            set({
-              // Keep `_useIndexedDB: true` so existing UI treats this as "large dataset mode".
-              // Under the hood we branch on `_useBackend` for all large-mode operations.
-              _useIndexedDB: true,
-              _useBackend: true,
-              _skipPersistence: true,
-              isSampledDataset: false,
-              sampledFromBytes: 0,
-              backendUploadId: null,
-              backendStoredFileId: null,
-            });
-
-            // For now, backend sampling expects CSV. (XLSX cannot be streamed safely in Node without full load.)
-            if (fileExtension !== 'csv') {
-              throw new Error('Large files must be uploaded as CSV for safe streaming. Please export as CSV and try again.');
-            }
-
-            // Try to resume an existing partial upload if we have one persisted and it matches the file.
-            const { fileNames, fileSizes, backendUploadId } = get();
-            const canResume =
-              Boolean(backendUploadId) &&
-              fileNames?.[0] === file.name &&
-              fileSizes?.[0] === file.size;
-
-            const { uploadId, storedFileId } = await uploadFileInChunks(file, progressCallback, {
-              // Use 3MB chunks for Vercel compatibility (Vercel has 4.5MB body size limit)
-              chunkSizeBytes: 3 * 1024 * 1024,
-              uploadId: canResume ? backendUploadId! : undefined,
-              onUploadId: (id) => {
-                // Persist early so a refresh/crash can resume.
-                set({ backendUploadId: id, fileNames: [file.name], fileSizes: [file.size] });
-              },
-              cleanupOnError: false,
-            });
-
-            // Kick off a backend-side full-file analysis in the background (best-effort).
-            // The UI can continue instantly on a bounded sample while analysis runs.
-            void fetch(`/api/uploads/${uploadId}/analysis`, { method: 'POST' }).catch(() => { });
-
-            // Always persist backend ids.
-            set({
-              backendUploadId: uploadId,
-              backendStoredFileId: storedFileId,
-            });
-
-            // Wait for upload session to be fully completed BEFORE any API calls
-            // This prevents 404 errors due to race conditions on serverless platforms
-            let sessionReady = false;
-            let retries = 0;
-            const maxRetries = 60; // Increased retries for slower processing (up to ~5 mins)
-            while (!sessionReady && retries < maxRetries) {
-              try {
-                const sessionRes = await fetch(`/api/uploads/${uploadId}`);
-                if (sessionRes.ok) {
-                  const sessionData = await sessionRes.json();
-                  if (sessionData.status === 'completed' && sessionData.storedFileId) {
-                    sessionReady = true;
-                    break;
-                  }
-                }
-              } catch {
-                // Continue retrying
-              }
-              retries++;
-              if (!sessionReady) {
-                // Exponential backoff: 500ms... cap at 2s
-                const delay = Math.min(500 + (retries * 500), 2000);
-                await new Promise(resolve => setTimeout(resolve, delay));
-              }
-            }
-
-            if (!sessionReady) {
-              // If still not ready after ~3-5 mins, we can't proceed safely.
-              throw new Error(`Server processing time out. Upload ${uploadId} is taking too long to merge. Please try again later.`);
-            }
-
-            // Pull a bounded sample from the stored file for tab-specific charts/tables.
-            // Aggregates (global + trends) will come from backend metrics.
-            // fetchBackendSample already has retry logic, but we wait for session to be ready first
-            const sample = await fetchBackendSample(uploadId, maxSampleRows);
-            set({
-              _useIndexedDB: true,
-              _useBackend: true,
-              rawTransactions: sample.transactions,
-              // We'll update transactionCount from backend metrics (full-file count),
-              // but keep sample length as a temporary non-zero value for UI readiness.
-              transactionCount: sample.transactions.length,
-              fileNames: [file.name],
-              fileSizes: [file.size],
-              backendUploadId: uploadId,
-              backendStoredFileId: storedFileId || sample.storedFileId,
-              isSampledDataset: true,
-              sampledFromBytes: file.size,
-              progress: { processed: sample.transactions.length, total: sample.transactions.length, percentage: 100, stage: 'complete' },
-              _skipPersistence: false,
-            });
-
-            if (sessionReady) {
-              await get().applyFilters();
-            } else {
-              // If session not ready after retries, still try to apply filters but with error handling
-              try {
-                await get().applyFilters();
-              } catch (error: any) {
-                console.warn('Failed to apply filters immediately after upload, will retry:', error);
-                // Retry after a delay
-                setTimeout(() => {
-                  get().applyFilters().catch((e) => {
-                    console.error('Error applying filters after retry:', e);
-                  });
-                }, 2000);
-              }
-            }
-
-            // Best-effort: update full-file metrics in the background (so totals are accurate).
-            // This may take time for multi-GB files; we keep the UI responsive.
-            void (async () => {
-              try {
-                // Wait a bit more to ensure session is fully committed
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                const eff = {
-                  startDate: get().filters.dateRange.start || undefined,
-                  endDate: get().filters.dateRange.end || undefined,
-                  paymentModes: get().filters.paymentModes.length > 0 ? get().filters.paymentModes : undefined,
-                  merchantIds: get().filters.merchantIds.length > 0 ? get().filters.merchantIds : undefined,
-                  pgs: get().filters.pgs.length > 0 ? get().filters.pgs : undefined,
-                  banks: get().filters.banks.length > 0 ? get().filters.banks : undefined,
-                  cardTypes: get().filters.cardTypes.length > 0 ? get().filters.cardTypes : undefined,
-                };
-                const m = await fetchBackendMetrics(uploadId, eff);
-                set({
-                  transactionCount: m.filteredTransactionCount,
-                  filteredTransactionCount: m.filteredTransactionCount,
-                  globalMetrics: m.globalMetrics,
-                  dailyTrends: m.dailyTrends,
-                });
-              } catch (error: any) {
-                console.warn('Failed to fetch backend metrics in background:', error);
-                // Retry once more after a delay
-                setTimeout(async () => {
-                  try {
-                    const eff = {
-                      startDate: get().filters.dateRange.start || undefined,
-                      endDate: get().filters.dateRange.end || undefined,
-                      paymentModes: get().filters.paymentModes.length > 0 ? get().filters.paymentModes : undefined,
-                      merchantIds: get().filters.merchantIds.length > 0 ? get().filters.merchantIds : undefined,
-                      pgs: get().filters.pgs.length > 0 ? get().filters.pgs : undefined,
-                      banks: get().filters.banks.length > 0 ? get().filters.banks : undefined,
-                      cardTypes: get().filters.cardTypes.length > 0 ? get().filters.cardTypes : undefined,
-                    };
-                    const m = await fetchBackendMetrics(uploadId, eff);
-                    set({
-                      transactionCount: m.filteredTransactionCount,
-                      filteredTransactionCount: m.filteredTransactionCount,
-                      globalMetrics: m.globalMetrics,
-                      dailyTrends: m.dailyTrends,
-                    });
-                  } catch {
-                    // Ignore final failure
-                  }
-                }, 3000);
-              }
-            })();
-            return;
-          }
-
           // Process and stream directly to IndexedDB for large files
           if (useIndexedDBMode) {
             console.log('Using IndexedDB streaming mode for large file');
-            set({ _useIndexedDB: true, _useBackend: false, _skipPersistence: true, isSampledDataset: false, sampledFromBytes: 0, backendUploadId: null, backendStoredFileId: null });
+            set({ _useIndexedDB: true, _skipPersistence: true, isSampledDataset: false, sampledFromBytes: 0 });
 
             if (fileExtension === 'csv') {
               // Stream CSV and write directly to IndexedDB
@@ -858,7 +543,7 @@ export const useStore = create<StoreState>()(
             }
           } else {
             // Small file mode - load into memory
-            set({ _useIndexedDB: false, _useBackend: false, isSampledDataset: false, sampledFromBytes: 0, backendUploadId: null, backendStoredFileId: null });
+            set({ _useIndexedDB: false, isSampledDataset: false, sampledFromBytes: 0 });
             let rawData: any[] = [];
 
             if (fileExtension === 'csv') {
@@ -944,14 +629,6 @@ export const useStore = create<StoreState>()(
 
       restoreFromIndexedDB: async () => {
         try {
-          const { _useBackend, backendUploadId } = get();
-          if (_useBackend) {
-            // Backend mode: no browser DB restore needed; just recompute aggregates.
-            if (!backendUploadId) return { status: 'missing', count: 0 };
-            await get().applyFilters();
-            return { status: 'restored', count: get().transactionCount };
-          }
-
           await dbManager.init();
           const count = await dbManager.getCount();
           if (count > 0) {
@@ -990,16 +667,11 @@ export const useStore = create<StoreState>()(
       },
 
       applyFilters: async () => {
-        const { rawTransactions, filters, _useIndexedDB, transactionCount, _useBackend, backendUploadId } = get();
+        const { rawTransactions, filters, _useIndexedDB, transactionCount } = get();
 
         const totalCount = _useIndexedDB ? transactionCount : rawTransactions.length;
 
-        // Backend mode can have transactionCount=0 after rehydrate; we still have data server-side.
-        if (!_useBackend && totalCount === 0) {
-          set({ filteredTransactions: [], filteredTransactionCount: 0, globalMetrics: null, dailyTrends: [], analysisStage: null });
-          return;
-        }
-        if (_useBackend && !backendUploadId) {
+        if (totalCount === 0) {
           set({ filteredTransactions: [], filteredTransactionCount: 0, globalMetrics: null, dailyTrends: [], analysisStage: null });
           return;
         }
@@ -1020,22 +692,6 @@ export const useStore = create<StoreState>()(
             banks: filters.banks.length > 0 ? filters.banks : undefined,
             cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
           };
-
-          if (_useBackend) {
-            if (!backendUploadId) throw new Error('Missing backend upload id');
-            // fetchBackendMetrics already has retry logic built in
-            const m = await fetchBackendMetrics(backendUploadId, effFilters);
-            console.log('[useStore] Backend metrics received:', m);
-
-            set({
-              filteredTransactionCount: m.filteredTransactionCount,
-              globalMetrics: m.globalMetrics,
-              dailyTrends: m.dailyTrends,
-              filteredTransactions: [], // Clear local txs to force chart components to use globalMetrics
-              analysisStage: null,
-            });
-            return;
-          }
 
           await dbManager.init();
           const agg = await dbManager.aggregateMetrics(effFilters);
@@ -1143,7 +799,7 @@ export const useStore = create<StoreState>()(
       },
 
       computeMetrics: async () => {
-        const { filteredTransactions, _useIndexedDB, filteredTransactionCount, _useBackend } = get();
+        const { filteredTransactions, _useIndexedDB, filteredTransactionCount } = get();
 
         const hasData = _useIndexedDB ? filteredTransactionCount > 0 : filteredTransactions.length > 0;
 
@@ -1174,9 +830,9 @@ export const useStore = create<StoreState>()(
           console.log('Adding file:', file.name, 'Size:', fileSizeMB.toFixed(2), 'MB');
 
           // Adding very large files on top of an existing dataset is not supported safely.
-          // Use Replace so we can stream/ingest deterministically (and/or use backend upload path).
+          // Use Replace so we can stream/ingest deterministically into IndexedDB.
           if (file.size >= 100 * 1024 * 1024) {
-            throw new Error('For files ≥100MB, please use Replace (top right) instead of Add. Large files are uploaded via backend chunked upload and may exceed safe in-browser merge limits.');
+            throw new Error('For files ≥100MB, please use Replace (top right) instead of Add. Large files are streamed into IndexedDB and should not be merged on top of an existing dataset.');
           }
 
           // Allow multi-GB files, but warn: these should be CSV and will stream through IndexedDB.
@@ -1270,15 +926,12 @@ export const useStore = create<StoreState>()(
           fileSizes: [],
           isSampledDataset: false,
           sampledFromBytes: 0,
-          backendUploadId: null,
-          backendStoredFileId: null,
           error: null,
           progress: null,
           filters: defaultFilters,
           analysisStage: null,
           _skipPersistence: false,
           _useIndexedDB: false,
-          _useBackend: false,
         });
       },
 
@@ -1296,10 +949,7 @@ export const useStore = create<StoreState>()(
             fileNames: state.fileNames,
             fileSizes: state.fileSizes,
             _useIndexedDB: state._useIndexedDB,
-            _useBackend: state._useBackend,
             transactionCount: state.transactionCount,
-            backendUploadId: state.backendUploadId,
-            backendStoredFileId: state.backendStoredFileId,
           };
         }
         return {
@@ -1307,10 +957,7 @@ export const useStore = create<StoreState>()(
           fileNames: state.fileNames,
           fileSizes: state.fileSizes,
           _useIndexedDB: state._useIndexedDB,
-          _useBackend: state._useBackend,
           transactionCount: state.transactionCount,
-          backendUploadId: state.backendUploadId,
-          backendStoredFileId: state.backendStoredFileId,
         };
       },
       merge: (persistedState: any, currentState: StoreState) => {
@@ -1324,12 +971,8 @@ export const useStore = create<StoreState>()(
             ...currentState,
             ...persistedState,
             rawTransactions: transactions,
-            // Preserve IndexedDB flags if present
             _useIndexedDB: persistedState._useIndexedDB ?? currentState._useIndexedDB,
-            _useBackend: persistedState._useBackend ?? currentState._useBackend,
             transactionCount: persistedState.transactionCount ?? currentState.transactionCount,
-            backendUploadId: persistedState.backendUploadId ?? currentState.backendUploadId,
-            backendStoredFileId: persistedState.backendStoredFileId ?? currentState.backendStoredFileId,
           };
         }
         // For IndexedDB mode (no rawTransactions but has fileNames)
@@ -1337,12 +980,8 @@ export const useStore = create<StoreState>()(
           return {
             ...currentState,
             ...persistedState,
-            // Preserve IndexedDB flags if present
             _useIndexedDB: persistedState._useIndexedDB ?? currentState._useIndexedDB,
-            _useBackend: persistedState._useBackend ?? currentState._useBackend,
             transactionCount: persistedState.transactionCount ?? currentState.transactionCount,
-            backendUploadId: persistedState.backendUploadId ?? currentState.backendUploadId,
-            backendStoredFileId: persistedState.backendStoredFileId ?? currentState.backendStoredFileId,
           };
         }
         return { ...currentState, ...persistedState };
@@ -1361,23 +1000,6 @@ export const useStore = create<StoreState>()(
             void store.applyFilters().catch((e) => {
               console.error('Error applying filters after rehydrate:', e);
             });
-            return;
-          }
-
-          // Backend mode: we may not have a local transactionCount, but we can recompute from server.
-          if (store._useBackend && store.backendUploadId) {
-            // Wait a bit for session to be ready after rehydration
-            setTimeout(() => {
-              void store.applyFilters().catch((e) => {
-                console.error('Error applying filters after rehydrate (backend mode):', e);
-                // Retry once more after delay
-                setTimeout(() => {
-                  void store.applyFilters().catch((err) => {
-                    console.error('Error applying filters after rehydrate retry:', err);
-                  });
-                }, 2000);
-              });
-            }, 500);
             return;
           }
 

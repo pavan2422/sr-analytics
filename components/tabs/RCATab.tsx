@@ -17,13 +17,10 @@ type PaymentMode = 'ALL' | 'UPI' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'PREPAID_CARD'
 export function RCATab() {
   // Use selectors - but DON'T load all transactions into memory
   const _useIndexedDB = useStore((state) => state._useIndexedDB);
-  const _useBackend = useStore((state) => state._useBackend);
-  const backendUploadId = useStore((state) => state.backendUploadId);
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const filteredTransactions = useStore((state) => state.filteredTransactions);
   const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
   const getFilteredTimeBounds = useStore((state) => state.getFilteredTimeBounds);
-  const filters = useStore((state) => state.filters);
   const [periodDays, setPeriodDays] = useState(7);
   const [selectedPaymentMode, setSelectedPaymentMode] = useState<PaymentMode>('ALL');
   const [comparison, setComparison] = useState<any>(null);
@@ -41,50 +38,6 @@ export function RCATab() {
     setIsComputing(true);
     const computeAsync = async () => {
       try {
-        if (_useIndexedDB && _useBackend) {
-          if (!backendUploadId) {
-            setComparison(null);
-            setIsComputing(false);
-            return;
-          }
-          const { retryApiCall } = await import('@/lib/retry-api');
-          const res = await retryApiCall(async () => {
-            const r = await fetch(`/api/uploads/${backendUploadId}/rca`, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({
-                periodDays,
-                selectedPaymentMode,
-                filters: {
-                  startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
-                  endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
-                  paymentModes: filters.paymentModes || [],
-                  merchantIds: filters.merchantIds || [],
-                  pgs: filters.pgs || [],
-                  banks: filters.banks || [],
-                  cardTypes: filters.cardTypes || [],
-                },
-              }),
-            });
-            if (!r.ok) {
-              const msg = await r.text().catch(() => '');
-              throw new Error(`Failed to compute backend RCA (${r.status}): ${msg}`);
-            }
-            return r;
-          }, 5, undefined, backendUploadId);
-          const json = (await res.json()) as any;
-          setComparison({
-            comparison: json.comparison,
-            userDroppedAnalysis: json.userDroppedAnalysis,
-            customerAnalytics: json.customerAnalytics,
-            problematicCustomers: json.problematicCustomers,
-            currentPeriodTransactions: [],
-            periods: json.periods,
-          });
-          setIsComputing(false);
-          return;
-        }
-
         let currentFiltered: Transaction[] = [];
         let previousFiltered: Transaction[] = [];
 
@@ -148,15 +101,12 @@ export function RCATab() {
     computeAsync();
   }, [
     _useIndexedDB,
-    _useBackend,
-    backendUploadId,
     filteredTransactionCount,
     periodDays,
     selectedPaymentMode,
     filteredTransactions,
     getSampleFilteredTransactions,
     getFilteredTimeBounds,
-    filters,
   ]);
 
   if (isComputing) {
@@ -450,24 +400,6 @@ export function RCATab() {
           userDroppedAnalyses={userDroppedAnalysis.dimensionAnalyses}
           currentPeriodTransactions={(comparison.currentPeriodTransactions || []) as Transaction[]}
           selectedPaymentMode={selectedPaymentMode}
-          backendContext={
-            _useIndexedDB && _useBackend && backendUploadId && comparison?.periods?.current
-              ? {
-                  uploadId: backendUploadId,
-                  periodStart: comparison.periods.current.start,
-                  periodEnd: comparison.periods.current.end,
-                  filters: {
-                    startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
-                    endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
-                    paymentModes: filters.paymentModes || [],
-                    merchantIds: filters.merchantIds || [],
-                    pgs: filters.pgs || [],
-                    banks: filters.banks || [],
-                    cardTypes: filters.cardTypes || [],
-                  },
-                }
-              : undefined
-          }
         />
       </div>
     </div>
@@ -942,32 +874,15 @@ function DimensionDeepDive({
   userDroppedAnalyses,
   currentPeriodTransactions,
   selectedPaymentMode,
-  backendContext,
 }: { 
   failedAnalyses: DimensionAnalysis[];
   userDroppedAnalyses: DimensionAnalysis[];
   currentPeriodTransactions: Transaction[];
   selectedPaymentMode: PaymentMode;
-  backendContext?: {
-    uploadId: string;
-    periodStart: string;
-    periodEnd: string;
-    filters: {
-      startDate: string | null;
-      endDate: string | null;
-      paymentModes: string[];
-      merchantIds: string[];
-      pgs: string[];
-      banks: string[];
-      cardTypes: string[];
-    };
-  };
 }) {
   const [analysisType, setAnalysisType] = useState<'FAILED' | 'USER_DROPPED'>('FAILED');
   const [selectedDimension, setSelectedDimension] = useState<string>('');
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
-  const [breakdownCache, setBreakdownCache] = useState<Record<string, { paymentModes: any[]; pgs: any[] }>>({});
-  const [breakdownLoading, setBreakdownLoading] = useState<Record<string, boolean>>({});
 
   // Switch between FAILED and USER_DROPPED analyses
   const analyses = analysisType === 'FAILED' ? failedAnalyses : userDroppedAnalyses;
@@ -1023,10 +938,6 @@ function DimensionDeepDive({
 
   // Compute breakdown for a specific analysis
   const computeBreakdown = (analysis: DimensionAnalysis) => {
-    const cacheKey = `${analysisType}::${analysis.dimension}::${analysis.dimensionValue}`;
-    if (backendContext) {
-      return breakdownCache[cacheKey] || { paymentModes: [], pgs: [] };
-    }
     // Filter to current period transactions matching this dimension value and status
     const relevantTxs = periodTxs.filter((tx) => {
       const statusMatch = analysisType === 'FAILED' ? tx.isFailed : tx.isUserDropped;
@@ -1078,50 +989,6 @@ function DimensionDeepDive({
       .filter((a) => a.currentVolume > 0)
       .sort((a, b) => b.currentVolume - a.currentVolume);
   }, [dimensionAnalyses]);
-
-  // Backend mode: fetch breakdown on-demand for the expanded row (full data, no sampling).
-  useEffect(() => {
-    if (!backendContext) return;
-    if (expandedRow === null) return;
-    const analysis = displayRows[expandedRow];
-    if (!analysis) return;
-
-    const cacheKey = `${analysisType}::${analysis.dimension}::${analysis.dimensionValue}`;
-    if (breakdownCache[cacheKey]) return;
-    if (breakdownLoading[cacheKey]) return;
-
-    setBreakdownLoading((s) => ({ ...s, [cacheKey]: true }));
-    let cancelled = false;
-    (async () => {
-      const res = await fetch(`/api/uploads/${backendContext.uploadId}/rca-breakdown`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          analysisType,
-          dimension: analysis.dimension,
-          dimensionValue: analysis.dimensionValue,
-          period: { start: backendContext.periodStart, end: backendContext.periodEnd },
-          filters: backendContext.filters,
-        }),
-      });
-      if (!res.ok) throw new Error(`Failed to load breakdown (${res.status})`);
-      const json = (await res.json()) as { paymentModes: any[]; pgs: any[] };
-      if (cancelled) return;
-      setBreakdownCache((s) => ({ ...s, [cacheKey]: { paymentModes: json.paymentModes || [], pgs: json.pgs || [] } }));
-    })()
-      .catch(() => {
-        if (cancelled) return;
-        setBreakdownCache((s) => ({ ...s, [cacheKey]: { paymentModes: [], pgs: [] } }));
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setBreakdownLoading((s) => ({ ...s, [cacheKey]: false }));
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [backendContext, analysisType, expandedRow, displayRows, breakdownCache, breakdownLoading]);
 
   if (dimensions.length === 0) {
     return <p className="text-muted-foreground">No dimension data available.</p>;
@@ -1222,8 +1089,6 @@ function DimensionDeepDive({
                   
                   // Compute breakdown - no hooks inside map!
                   const breakdown = isExpanded ? computeBreakdown(analysis) : { paymentModes: [], pgs: [] };
-                  const cacheKey = `${analysisType}::${analysis.dimension}::${analysis.dimensionValue}`;
-                  const isLoading = Boolean(backendContext && breakdownLoading[cacheKey]);
                   
                   return (
                     <React.Fragment key={rowKey}>
@@ -1331,9 +1196,6 @@ function DimensionDeepDive({
                       {isExpanded && (
                         <tr className="border-b border-border bg-muted/20">
                           <td colSpan={showDimensionColumn ? 10 : 9} className="py-4 px-6">
-                            {isLoading && (
-                              <div className="text-xs text-muted-foreground mb-3">Loading full-data breakdown…</div>
-                            )}
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                               {/* Payment Mode Breakdown */}
                               <div>

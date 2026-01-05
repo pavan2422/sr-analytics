@@ -14,8 +14,6 @@ export function OverviewTab() {
   const globalMetrics = useStore((state) => state.globalMetrics);
   const dailyTrends = useStore((state) => state.dailyTrends);
   const _useIndexedDB = useStore((state) => state._useIndexedDB);
-  const _useBackend = useStore((state) => state._useBackend);
-  const backendUploadId = useStore((state) => state.backendUploadId);
   const filteredTransactions = useStore((state) => state.filteredTransactions);
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
@@ -39,33 +37,7 @@ export function OverviewTab() {
     const run = async () => {
       try {
         setSampleStatus('loading');
-        if (_useIndexedDB && _useBackend) {
-          if (!backendUploadId) throw new Error('Missing backend upload id');
-          const params = new URLSearchParams();
-          if (filters.dateRange.start) params.set('startDate', filters.dateRange.start.toISOString());
-          if (filters.dateRange.end) params.set('endDate', filters.dateRange.end.toISOString());
-          for (const pm of filters.paymentModes || []) params.append('paymentModes', pm);
-          for (const id of filters.merchantIds || []) params.append('merchantIds', id);
-          for (const pg of filters.pgs || []) params.append('pgs', pg);
-          for (const b of filters.banks || []) params.append('banks', b);
-          for (const ct of filters.cardTypes || []) params.append('cardTypes', ct);
-
-          const { retryApiCall } = await import('@/lib/retry-api');
-          const res = await retryApiCall(async () => {
-            const r = await fetch(`/api/uploads/${backendUploadId}/overview-breakdowns?${params.toString()}`);
-            if (!r.ok) {
-              const msg = await r.text().catch(() => '');
-              throw new Error(`Failed to load breakdowns (${r.status}): ${msg}`);
-            }
-            return r;
-          }, 5, undefined, backendUploadId);
-          const json = (await res.json()) as OverviewBreakdowns;
-          if (!cancelled) {
-            setSample([]); // not used in backend mode
-            setBreakdowns(json);
-            setSampleStatus('ready');
-          }
-        } else if (_useIndexedDB) {
+        if (_useIndexedDB) {
           // For large datasets, compute from a bounded sample.
           const txs = await getSampleFilteredTransactions(50000);
           if (!cancelled) {
@@ -97,8 +69,6 @@ export function OverviewTab() {
     };
   }, [
     _useIndexedDB,
-    _useBackend,
-    backendUploadId,
     filteredTransactionCount,
     filteredTransactions,
     getSampleFilteredTransactions,
