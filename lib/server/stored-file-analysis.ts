@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import csvParser from 'csv-parser';
+import * as fastcsv from 'fast-csv';
 import { format, parse } from 'date-fns';
 import { prisma } from '@/lib/prisma';
 import { calculateSR } from '@/lib/utils';
@@ -67,12 +67,13 @@ function parseDate(value: any): Date | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
 
+  // OPTIMIZATION: Try native Date first (V8 handles common formats liek "October 1, 2025" very fast)
+  const isoParsed = new Date(trimmed);
+  if (!Number.isNaN(isoParsed.getTime())) return isoParsed;
+
   try {
     const parsedA = parse(trimmed, 'MMMM d, yyyy, h:mm a', new Date());
     if (!Number.isNaN(parsedA.getTime())) return parsedA;
-
-    const isoParsed = new Date(trimmed);
-    if (!Number.isNaN(isoParsed.getTime())) return isoParsed;
 
     const formats = [
       'MMM d, yyyy, h:mm a',
@@ -94,22 +95,18 @@ function parseDate(value: any): Date | null {
     // fall through
   }
 
-  const fallback = new Date(trimmed);
-  return Number.isNaN(fallback.getTime()) ? null : fallback;
+  return null;
 }
 
 function normalizeRow(raw: Record<string, any>) {
-  const normalized: Record<string, any> = {};
-  for (const k of Object.keys(raw)) {
-    const lowerKey = String(k).toLowerCase().trim();
-    let v = raw[k];
-    if (typeof v === 'string') v = v.trim();
-    normalized[lowerKey] = v;
-  }
+  // OPTIMIZATION: headers are already lowercased by the parser transform. 
+  // We access properties directly to avoid expensive object iteration/creation.
+  // We use fallback to 'undefined' which matches the logic of finding keys.
 
-  const txstatus = normalized.txstatus ? String(normalized.txstatus).toUpperCase().trim() : '';
-  const txtime = parseDate(normalized.txtime);
-  const txamount = parseNumber(normalized.txamount);
+  const txstatus = raw.txstatus ? String(raw.txstatus).toUpperCase().trim() : '';
+  // Note: we just pass the raw value to parseDate/parseNumber which trim strings anyway
+  const txtime = parseDate(raw.txtime);
+  const txamount = parseNumber(raw.txamount);
 
   return { txstatus, txtime, txamount };
 }
@@ -185,12 +182,19 @@ async function runStoredFileAnalysis(storedFileId: string) {
   try {
     await new Promise<void>((resolve, reject) => {
       const stream = fs
-        .createReadStream(filePath)
+        .createReadStream(filePath, {
+          highWaterMark: 1024 * 1024, // 1MB buffer to prevent premature stream end
+        })
         .pipe(
-          csvParser({
-            mapHeaders: ({ header }) => String(header || '').trim().toLowerCase(),
-            skipLines: 0,
-          })
+          fastcsv.parse({ headers: true, trim: true, ignoreEmpty: true })
+            .transform((row: any) => {
+              // Lowercase all keys to match previous normalization
+              const lowercased: any = {};
+              for (const k of Object.keys(row)) {
+                lowercased[k.toLowerCase().trim()] = row[k];
+              }
+              return lowercased;
+            })
         );
 
       stream.on('data', (row: any) => {
@@ -227,7 +231,7 @@ async function runStoredFileAnalysis(storedFileId: string) {
           // Best-effort progress update; don't await inside the stream.
           void prisma.storedFileAnalysis
             .update({ where: { storedFileId }, data: { processedRows } })
-            .catch(() => {});
+            .catch(() => { });
         }
       });
 

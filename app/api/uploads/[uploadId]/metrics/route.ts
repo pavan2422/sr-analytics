@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
-import csvParser from 'csv-parser';
+import * as fastcsv from 'fast-csv';
 import { format, parse } from 'date-fns';
 import { calculateSR } from '@/lib/utils';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
@@ -31,12 +31,13 @@ function parseDate(value: any): Date | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
 
+  // OPTIMIZATION: Try native Date first
+  const isoParsed = new Date(trimmed);
+  if (!Number.isNaN(isoParsed.getTime())) return isoParsed;
+
   try {
     const parsedA = parse(trimmed, 'MMMM d, yyyy, h:mm a', new Date());
     if (!Number.isNaN(parsedA.getTime())) return parsedA;
-
-    const isoParsed = new Date(trimmed);
-    if (!Number.isNaN(isoParsed.getTime())) return isoParsed;
 
     const formats = [
       'MMM d, yyyy, h:mm a',
@@ -57,8 +58,7 @@ function parseDate(value: any): Date | null {
     // fall through
   }
 
-  const fallback = new Date(trimmed);
-  return Number.isNaN(fallback.getTime()) ? null : fallback;
+  return null;
 }
 
 function classifyUPIFlow(bankname: string | undefined): string {
@@ -68,23 +68,16 @@ function classifyUPIFlow(bankname: string | undefined): string {
 }
 
 function normalizeRow(raw: Record<string, any>) {
-  const normalized: Record<string, any> = {};
-  for (const k of Object.keys(raw)) {
-    const lowerKey = String(k).toLowerCase().trim();
-    let v = raw[k];
-    if (typeof v === 'string') v = v.trim();
-    normalized[lowerKey] = v;
-  }
+  // OPTIMIZATION: Removed loop. Access lowercase headers directly from transform map.
+  const txstatus = raw.txstatus ? String(raw.txstatus).toUpperCase().trim() : '';
+  const paymentmode = raw.paymentmode ? String(raw.paymentmode).toUpperCase().trim() : '';
+  const merchantid = String(raw.merchantid || '').trim();
+  const pg = String(raw.pg || '').trim();
+  const bankname = String(raw.bankname || '').trim();
+  const cardtype = String(raw.cardtype || '').trim();
 
-  const txstatus = normalized.txstatus ? String(normalized.txstatus).toUpperCase().trim() : '';
-  const paymentmode = normalized.paymentmode ? String(normalized.paymentmode).toUpperCase().trim() : '';
-  const merchantid = String(normalized.merchantid || '').trim();
-  const pg = String(normalized.pg || '').trim();
-  const bankname = String(normalized.bankname || '').trim();
-  const cardtype = String(normalized.cardtype || '').trim();
-
-  const txtime = parseDate(normalized.txtime);
-  const txamount = parseNumber(normalized.txamount);
+  const txtime = parseDate(raw.txtime);
+  const txamount = parseNumber(raw.txamount);
 
   return { txstatus, paymentmode, merchantid, pg, bankname, cardtype, txtime, txamount };
 }
@@ -129,7 +122,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
 
     const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
     if (!fs.existsSync(filePath)) {
-      return NextResponse.json({ 
+      return NextResponse.json({
         error: 'Stored file missing on disk',
         storagePath: session.storedFile.storagePath,
         resolvedPath: filePath,
@@ -137,113 +130,119 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
       }, { status: 500 });
     }
 
-  const startDate = body.startDate ? new Date(body.startDate) : null;
-  const endDateRaw = body.endDate ? new Date(body.endDate) : null;
-  const endDate = endDateRaw ? new Date(endDateRaw) : null;
-  if (endDate) endDate.setHours(23, 59, 59, 999);
+    const startDate = body.startDate ? new Date(body.startDate) : null;
+    const endDateRaw = body.endDate ? new Date(body.endDate) : null;
+    const endDate = endDateRaw ? new Date(endDateRaw) : null;
+    if (endDate) endDate.setHours(23, 59, 59, 999);
 
-  const paymentModeSet = body.paymentModes?.length ? new Set(body.paymentModes.map((s) => String(s).toUpperCase().trim())) : null;
-  const merchantIdSet = body.merchantIds?.length ? new Set(body.merchantIds.map((s) => String(s).trim())) : null;
-  const pgSet = body.pgs?.length ? new Set(body.pgs.map((s) => String(s).trim())) : null;
-  const bankSet = body.banks?.length ? new Set(body.banks.map((s) => String(s).trim())) : null;
-  const cardTypeSet = body.cardTypes?.length ? new Set(body.cardTypes.map((s) => String(s).trim())) : null;
+    const paymentModeSet = body.paymentModes?.length ? new Set(body.paymentModes.map((s) => String(s).toUpperCase().trim())) : null;
+    const merchantIdSet = body.merchantIds?.length ? new Set(body.merchantIds.map((s) => String(s).trim())) : null;
+    const pgSet = body.pgs?.length ? new Set(body.pgs.map((s) => String(s).trim())) : null;
+    const bankSet = body.banks?.length ? new Set(body.banks.map((s) => String(s).trim())) : null;
+    const cardTypeSet = body.cardTypes?.length ? new Set(body.cardTypes.map((s) => String(s).trim())) : null;
 
-  let totalCount = 0;
-  let successCount = 0;
-  let failedCount = 0;
-  let userDroppedCount = 0;
-  let successGmv = 0;
+    let totalCount = 0;
+    let successCount = 0;
+    let failedCount = 0;
+    let userDroppedCount = 0;
+    let successGmv = 0;
 
-  const dailyMap = new Map<string, { date: string; volume: number; successCount: number; failedCount: number; userDroppedCount: number }>();
+    const dailyMap = new Map<string, { date: string; volume: number; successCount: number; failedCount: number; userDroppedCount: number }>();
 
-  await new Promise<void>((resolve, reject) => {
-    const stream = fs
-      .createReadStream(filePath)
-      .pipe(
-        csvParser({
-          mapHeaders: ({ header }) => String(header || '').trim().toLowerCase(),
-          skipLines: 0,
+    await new Promise<void>((resolve, reject) => {
+      const stream = fs
+        .createReadStream(filePath, {
+          highWaterMark: 1024 * 1024,
         })
-      );
+        .pipe(
+          fastcsv.parse({ headers: true, trim: true, ignoreEmpty: true })
+            .transform((row: any) => {
+              const lowercased: any = {};
+              for (const k of Object.keys(row)) {
+                lowercased[k.toLowerCase().trim()] = row[k];
+              }
+              return lowercased;
+            })
+        );
 
-    stream.on('data', (row: any) => {
-      const { txstatus, paymentmode, merchantid, pg, bankname, cardtype, txtime, txamount } = normalizeRow(
-        row as Record<string, any>
-      );
+      stream.on('data', (row: any) => {
+        const { txstatus, paymentmode, merchantid, pg, bankname, cardtype, txtime, txamount } = normalizeRow(
+          row as Record<string, any>
+        );
 
-      if (startDate || endDate || paymentModeSet || merchantIdSet || pgSet || bankSet || cardTypeSet) {
-        if (!txtime) return;
-        if (startDate && txtime < startDate) return;
-        if (endDate && txtime > endDate) return;
-        if (paymentModeSet && !paymentModeSet.has(paymentmode)) return;
-        if (merchantIdSet && !merchantIdSet.has(merchantid)) return;
-        if (pgSet && !pgSet.has(pg)) return;
-        if (bankSet) {
-          const flow = classifyUPIFlow(bankname);
-          if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
+        if (startDate || endDate || paymentModeSet || merchantIdSet || pgSet || bankSet || cardTypeSet) {
+          if (!txtime) return;
+          if (startDate && txtime < startDate) return;
+          if (endDate && txtime > endDate) return;
+          if (paymentModeSet && !paymentModeSet.has(paymentmode)) return;
+          if (merchantIdSet && !merchantIdSet.has(merchantid)) return;
+          if (pgSet && !pgSet.has(pg)) return;
+          if (bankSet) {
+            const flow = classifyUPIFlow(bankname);
+            if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
+          }
+          if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
         }
-        if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
-      }
 
-      totalCount++;
+        totalCount++;
 
-      const isSuccess = txstatus === 'SUCCESS';
-      const isFailed = txstatus === 'FAILED';
-      const isUserDropped = txstatus === 'USER_DROPPED';
+        const isSuccess = txstatus === 'SUCCESS';
+        const isFailed = txstatus === 'FAILED';
+        const isUserDropped = txstatus === 'USER_DROPPED';
 
-      if (isSuccess) {
-        successCount++;
-        successGmv += txamount || 0;
-      } else if (isFailed) {
-        failedCount++;
-      } else if (isUserDropped) {
-        userDroppedCount++;
-      }
-
-      if (txtime) {
-        const date = format(txtime, 'yyyy-MM-dd');
-        if (!dailyMap.has(date)) {
-          dailyMap.set(date, { date, volume: 0, successCount: 0, failedCount: 0, userDroppedCount: 0 });
+        if (isSuccess) {
+          successCount++;
+          successGmv += txamount || 0;
+        } else if (isFailed) {
+          failedCount++;
+        } else if (isUserDropped) {
+          userDroppedCount++;
         }
-        const d = dailyMap.get(date)!;
-        d.volume++;
-        if (isSuccess) d.successCount++;
-        if (isFailed) d.failedCount++;
-        if (isUserDropped) d.userDroppedCount++;
-      }
+
+        if (txtime) {
+          const date = format(txtime, 'yyyy-MM-dd');
+          if (!dailyMap.has(date)) {
+            dailyMap.set(date, { date, volume: 0, successCount: 0, failedCount: 0, userDroppedCount: 0 });
+          }
+          const d = dailyMap.get(date)!;
+          d.volume++;
+          if (isSuccess) d.successCount++;
+          if (isFailed) d.failedCount++;
+          if (isUserDropped) d.userDroppedCount++;
+        }
+      });
+
+      stream.on('error', (err) => reject(err));
+      stream.on('end', () => resolve());
+      stream.on('close', () => resolve());
     });
 
-    stream.on('error', (err) => reject(err));
-    stream.on('end', () => resolve());
-    stream.on('close', () => resolve());
-  });
+    const dailyTrends = Array.from(dailyMap.values())
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((d) => ({
+        ...d,
+        sr: calculateSR(d.successCount, d.volume),
+      }));
 
-  const dailyTrends = Array.from(dailyMap.values())
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .map((d) => ({
-      ...d,
-      sr: calculateSR(d.successCount, d.volume),
-    }));
+    const globalMetrics = {
+      totalCount,
+      successCount,
+      failedCount,
+      userDroppedCount,
+      sr: calculateSR(successCount, totalCount),
+      successGmv,
+      failedPercent: calculateSR(failedCount, totalCount),
+      userDroppedPercent: calculateSR(userDroppedCount, totalCount),
+    };
 
-  const globalMetrics = {
-    totalCount,
-    successCount,
-    failedCount,
-    userDroppedCount,
-    sr: calculateSR(successCount, totalCount),
-    successGmv,
-    failedPercent: calculateSR(failedCount, totalCount),
-    userDroppedPercent: calculateSR(userDroppedCount, totalCount),
-  };
-
-  return NextResponse.json(
-    {
-      filteredTransactionCount: totalCount,
-      globalMetrics,
-      dailyTrends,
-    },
-    { status: 200 }
-  );
+    return NextResponse.json(
+      {
+        filteredTransactionCount: totalCount,
+        globalMetrics,
+        dailyTrends,
+      },
+      { status: 200 }
+    );
   } catch (e: any) {
     // Catch any unhandled errors
     const msg = String(e?.message || 'Unknown error');

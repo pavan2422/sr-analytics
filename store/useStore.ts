@@ -27,16 +27,16 @@ interface StoreState {
   progress: ProcessingProgress | null; // Progress tracking for large files
   hasHydrated: boolean; // True after Zustand persist rehydration completes
   analysisStage: 'FILTERING' | 'COMPUTING' | null; // UI hint for post-upload analysis work
-  
+
   // Filters
   filters: FilterState;
-  
+
   // Computed data (cached results)
   filteredTransactions: Transaction[]; // Only populated for small filtered sets
   filteredTransactionCount: number; // Count of filtered transactions
   globalMetrics: Metrics | null;
   dailyTrends: DailyTrend[];
-  
+
   // Actions
   setRawTransactions: (transactions: Transaction[]) => void;
   loadDataFromFile: (file: File) => Promise<void>;
@@ -47,7 +47,7 @@ interface StoreState {
   resetFilters: () => void;
   applyFilters: () => Promise<void>;
   computeMetrics: () => Promise<void>;
-  
+
   // IndexedDB operations
   streamFilteredTransactions: (onChunk: (chunk: Transaction[]) => Promise<void>, chunkSize?: number) => Promise<void>;
   getSampleFilteredTransactions: (maxRows?: number, overrides?: Partial<{
@@ -61,7 +61,7 @@ interface StoreState {
   }>) => Promise<Transaction[]>;
   getIndexedDBFilterOptions: () => Promise<{ paymentModes: string[]; merchantIds: string[] }>;
   getFilteredTimeBounds: () => Promise<{ min?: Date; max?: Date }>;
-  
+
   // Computed selectors (memoized in components)
   getFilteredTransactions: () => Transaction[];
   getGlobalMetrics: () => Metrics | null;
@@ -295,7 +295,7 @@ async function streamCSVToIndexedDB(file: File, progressCallback: (progress: Pro
   const Papa = (await import('papaparse')).default;
   // IMPORTANT: For multi-GB files, normalizing on the main thread will freeze/crash the tab.
   // We normalize batches in our own Web Worker (`public/file-processor-worker.js`).
-  
+
   return new Promise<void>((resolve, reject) => {
     let processedRows = 0;
     let normalizedChunk: Transaction[] = [];
@@ -303,7 +303,7 @@ async function streamCSVToIndexedDB(file: File, progressCallback: (progress: Pro
     const chunkSize = 50000;
     const fileSize = file.size;
     let lastProgressUpdate = Date.now();
-    
+
     progressCallback({
       processed: 0,
       total: fileSize,
@@ -343,7 +343,7 @@ async function streamCSVToIndexedDB(file: File, progressCallback: (progress: Pro
         w.postMessage({ type: 'NORMALIZE_BATCH', payload: { batch } });
       });
     };
-    
+
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
@@ -361,7 +361,7 @@ async function streamCSVToIndexedDB(file: File, progressCallback: (progress: Pro
         }
         const chunkData = chunkResults.data as any[];
         processedRows += chunkData.length;
-        
+
         // Normalize chunk in our worker (critical for stability on 1GB+ files)
         let normalized: Transaction[] = [];
         try {
@@ -372,7 +372,7 @@ async function streamCSVToIndexedDB(file: File, progressCallback: (progress: Pro
           return;
         }
         normalizedChunk.push(...normalized);
-        
+
         // When chunk is large enough, write to IndexedDB
         if (normalizedChunk.length >= chunkSize) {
           const toStore = normalizedChunk.splice(0, chunkSize);
@@ -383,14 +383,14 @@ async function streamCSVToIndexedDB(file: File, progressCallback: (progress: Pro
             reject(error);
             return;
           }
-          
+
           // Progress update
           const now = Date.now();
           if (now - lastProgressUpdate > 200) {
             // Estimate progress based on file size processed (more accurate for large files)
             // Assume average row size of ~500 bytes for CSV data
             const estimatedRowsFromFileSize = fileSize / 500;
-            const progressPercentage = estimatedRowsFromFileSize > 0 
+            const progressPercentage = estimatedRowsFromFileSize > 0
               ? Math.min((processedRows / estimatedRowsFromFileSize) * 90, 90)
               : Math.min((processedRows / 10000000) * 90, 90);
             progressCallback({
@@ -402,7 +402,7 @@ async function streamCSVToIndexedDB(file: File, progressCallback: (progress: Pro
             lastProgressUpdate = now;
           }
         }
-        
+
         // Yield to browser and resume parsing
         setTimeout(() => {
           try {
@@ -422,7 +422,7 @@ async function streamCSVToIndexedDB(file: File, progressCallback: (progress: Pro
             return;
           }
         }
-        
+
         progressCallback({
           processed: processedRows,
           total: processedRows,
@@ -457,20 +457,20 @@ async function streamCSVToIndexedDB(file: File, progressCallback: (progress: Pro
 async function processAndStoreChunks(rawData: any[], progressCallback: (progress: ProcessingProgress) => void): Promise<void> {
   const chunkSize = 10000;
   const { normalizeData } = await import('@/lib/data-normalization');
-  
+
   for (let i = 0; i < rawData.length; i += chunkSize) {
     const chunk = rawData.slice(i, i + chunkSize);
     const normalized = normalizeData(chunk);
-    
+
     await dbManager.addTransactions(normalized);
-    
+
     progressCallback({
       processed: Math.min(i + chunkSize, rawData.length),
       total: rawData.length,
       percentage: 60 + Math.round(((i + chunkSize) / rawData.length) * 35),
       stage: 'normalizing',
     });
-    
+
     // Yield to browser
     await new Promise(resolve => setTimeout(resolve, 0));
   }
@@ -508,84 +508,84 @@ const cancelPendingMetrics = () => {
 export const useStore = create<StoreState>()(
   persist(
     (set, get) => ({
-  rawTransactions: [],
-  transactionCount: 0,
-  isLoading: false,
-  error: null,
-  fileNames: [],
-  fileSizes: [],
-  isSampledDataset: false,
-  sampledFromBytes: 0,
-  backendUploadId: null,
-  backendStoredFileId: null,
-  _skipPersistence: false,
-  _useIndexedDB: false,
-  _useBackend: false,
-  progress: null,
-  hasHydrated: false,
-  analysisStage: null,
-  filters: defaultFilters,
-  filteredTransactions: [],
-  filteredTransactionCount: 0,
-  globalMetrics: null,
-  dailyTrends: [],
-  
-  streamFilteredTransactions: async (onChunk, chunkSize = 50000) => {
-    const { filters, _useIndexedDB } = get();
-    
-    if (!_useIndexedDB) {
-      // For small datasets, use in-memory transactions
-      const { filteredTransactions } = get();
-      for (let i = 0; i < filteredTransactions.length; i += chunkSize) {
-        await onChunk(filteredTransactions.slice(i, i + chunkSize));
-        if (i + chunkSize < filteredTransactions.length) {
-          await new Promise(resolve => setTimeout(resolve, 0));
+      rawTransactions: [],
+      transactionCount: 0,
+      isLoading: false,
+      error: null,
+      fileNames: [],
+      fileSizes: [],
+      isSampledDataset: false,
+      sampledFromBytes: 0,
+      backendUploadId: null,
+      backendStoredFileId: null,
+      _skipPersistence: false,
+      _useIndexedDB: false,
+      _useBackend: false,
+      progress: null,
+      hasHydrated: false,
+      analysisStage: null,
+      filters: defaultFilters,
+      filteredTransactions: [],
+      filteredTransactionCount: 0,
+      globalMetrics: null,
+      dailyTrends: [],
+
+      streamFilteredTransactions: async (onChunk, chunkSize = 50000) => {
+        const { filters, _useIndexedDB } = get();
+
+        if (!_useIndexedDB) {
+          // For small datasets, use in-memory transactions
+          const { filteredTransactions } = get();
+          for (let i = 0; i < filteredTransactions.length; i += chunkSize) {
+            await onChunk(filteredTransactions.slice(i, i + chunkSize));
+            if (i + chunkSize < filteredTransactions.length) {
+              await new Promise(resolve => setTimeout(resolve, 0));
+            }
+          }
+          return;
         }
-      }
-      return;
-    }
-    
-    // For large datasets, stream from IndexedDB
-    if (get()._useBackend) {
-      throw new Error('Streaming full filtered transactions is not supported in backend mode yet. Use sampling APIs instead.');
-    }
-    await dbManager.init();
-    await dbManager.streamTransactions(
-      onChunk,
-      chunkSize,
-      {
-        startDate: filters.dateRange.start || undefined,
-        endDate: filters.dateRange.end || undefined,
-        paymentModes: filters.paymentModes.length > 0 ? filters.paymentModes : undefined,
-        merchantIds: filters.merchantIds.length > 0 ? filters.merchantIds : undefined,
-        pgs: filters.pgs.length > 0 ? filters.pgs : undefined,
-        banks: filters.banks.length > 0 ? filters.banks : undefined,
-        cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
-      }
-    );
-  },
 
-  getSampleFilteredTransactions: async (maxRows = 50000, overrides) => {
-    const { filters, _useBackend, backendUploadId } = get();
-    const eff = {
-      startDate: overrides?.startDate ?? filters.dateRange.start ?? undefined,
-      endDate: overrides?.endDate ?? filters.dateRange.end ?? undefined,
-      paymentModes: overrides?.paymentModes ?? (filters.paymentModes.length > 0 ? filters.paymentModes : undefined),
-      merchantIds: overrides?.merchantIds ?? (filters.merchantIds.length > 0 ? filters.merchantIds : undefined),
-      pgs: overrides?.pgs ?? (filters.pgs.length > 0 ? filters.pgs : undefined),
-      banks: overrides?.banks ?? (filters.banks.length > 0 ? filters.banks : undefined),
-      cardTypes: overrides?.cardTypes ?? (filters.cardTypes.length > 0 ? filters.cardTypes : undefined),
-    };
+        // For large datasets, stream from IndexedDB
+        if (get()._useBackend) {
+          throw new Error('Streaming full filtered transactions is not supported in backend mode yet. Use sampling APIs instead.');
+        }
+        await dbManager.init();
+        await dbManager.streamTransactions(
+          onChunk,
+          chunkSize,
+          {
+            startDate: filters.dateRange.start || undefined,
+            endDate: filters.dateRange.end || undefined,
+            paymentModes: filters.paymentModes.length > 0 ? filters.paymentModes : undefined,
+            merchantIds: filters.merchantIds.length > 0 ? filters.merchantIds : undefined,
+            pgs: filters.pgs.length > 0 ? filters.pgs : undefined,
+            banks: filters.banks.length > 0 ? filters.banks : undefined,
+            cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
+          }
+        );
+      },
 
-    if (_useBackend) {
-      if (!backendUploadId) throw new Error('Missing backend upload id');
-      const json = await fetchBackendSampleFiltered(backendUploadId, maxRows, eff);
-      return json.transactions;
-    }
+      getSampleFilteredTransactions: async (maxRows = 50000, overrides) => {
+        const { filters, _useBackend, backendUploadId } = get();
+        const eff = {
+          startDate: overrides?.startDate ?? filters.dateRange.start ?? undefined,
+          endDate: overrides?.endDate ?? filters.dateRange.end ?? undefined,
+          paymentModes: overrides?.paymentModes ?? (filters.paymentModes.length > 0 ? filters.paymentModes : undefined),
+          merchantIds: overrides?.merchantIds ?? (filters.merchantIds.length > 0 ? filters.merchantIds : undefined),
+          pgs: overrides?.pgs ?? (filters.pgs.length > 0 ? filters.pgs : undefined),
+          banks: overrides?.banks ?? (filters.banks.length > 0 ? filters.banks : undefined),
+          cardTypes: overrides?.cardTypes ?? (filters.cardTypes.length > 0 ? filters.cardTypes : undefined),
+        };
 
-    await dbManager.init();
-    return dbManager.sampleTransactions(maxRows, eff);
-  },
+        if (_useBackend) {
+          if (!backendUploadId) throw new Error('Missing backend upload id');
+          const json = await fetchBackendSampleFiltered(backendUploadId, maxRows, eff);
+          return json.transactions;
+        }
+
+        await dbManager.init();
+        return dbManager.sampleTransactions(maxRows, eff);
+      },
 
       getIndexedDBFilterOptions: async () => {
         const { _useBackend, backendUploadId } = get();
@@ -608,202 +608,183 @@ export const useStore = create<StoreState>()(
         };
       },
 
-  getFilteredTimeBounds: async () => {
-    const { filters, _useBackend, backendUploadId } = get();
-    const eff = {
-      startDate: filters.dateRange.start || undefined,
-      endDate: filters.dateRange.end || undefined,
-      paymentModes: filters.paymentModes.length > 0 ? filters.paymentModes : undefined,
-      merchantIds: filters.merchantIds.length > 0 ? filters.merchantIds : undefined,
-      pgs: filters.pgs.length > 0 ? filters.pgs : undefined,
-      banks: filters.banks.length > 0 ? filters.banks : undefined,
-      cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
-    };
-    if (_useBackend) {
-      if (!backendUploadId) throw new Error('Missing backend upload id');
-      return fetchBackendTimeBounds(backendUploadId, eff);
-    }
-    await dbManager.init();
-    return dbManager.getFilteredTimeBounds(eff);
-  },
-  
-  setRawTransactions: (transactions) => {
-    set({ rawTransactions: transactions });
-    void get().applyFilters();
-  },
-  
-  loadDataFromFile: async (file: File) => {
-    set({ isLoading: true, error: null, progress: null, analysisStage: null });
-    
-    try {
-      await dbManager.init();
-      await dbManager.clear(); // Clear previous data
-      
-      const fileSizeMB = file.size / 1024 / 1024;
-      console.log('Loading file:', file.name, 'Size:', fileSizeMB.toFixed(2), 'MB');
-
-      const fileExtension = file.name.split('.').pop()?.toLowerCase();
-
-      // For large files we always do a backend-resumable chunked upload first.
-      // Then we *always* try to ingest into IndexedDB for full interactivity (all features).
-      // IndexedDB can handle multi-GB files (browsers typically allow 50% of disk space).
-      // If browser quota/memory can't handle it, we fall back to a bounded sample (still stable).
-      const backendUploadThresholdBytes = 100 * 1024 * 1024; // 100MB
-      // Removed size limit - IndexedDB can handle very large files (2GB+)
-      // Browser quota limits will be handled gracefully with error messages
-      const shouldUseBackendUpload = fileExtension === 'csv' && file.size >= backendUploadThresholdBytes;
-      
-      // For files > 100MB, use IndexedDB streaming mode
-      const useIndexedDBMode = !shouldUseBackendUpload && (file.size > 100 * 1024 * 1024 || fileSizeMB > 100);
-      let totalRows = 0;
-      
-      const progressCallback = (progress: ProcessingProgress) => {
-        set({ progress });
-      };
-
-      if (shouldUseBackendUpload) {
-        // For CSVs >= 100MB: use backend mode (upload + server-side metrics/sampling).
-        // This avoids browser storage/quota issues entirely.
-        const maxSampleRows = 100000;
-        set({
-          // Keep `_useIndexedDB: true` so existing UI treats this as "large dataset mode".
-          // Under the hood we branch on `_useBackend` for all large-mode operations.
-          _useIndexedDB: true,
-          _useBackend: true,
-          _skipPersistence: true,
-          isSampledDataset: false,
-          sampledFromBytes: 0,
-          backendUploadId: null,
-          backendStoredFileId: null,
-        });
-
-        // For now, backend sampling expects CSV. (XLSX cannot be streamed safely in Node without full load.)
-        if (fileExtension !== 'csv') {
-          throw new Error('Large files must be uploaded as CSV for safe streaming. Please export as CSV and try again.');
+      getFilteredTimeBounds: async () => {
+        const { filters, _useBackend, backendUploadId } = get();
+        const eff = {
+          startDate: filters.dateRange.start || undefined,
+          endDate: filters.dateRange.end || undefined,
+          paymentModes: filters.paymentModes.length > 0 ? filters.paymentModes : undefined,
+          merchantIds: filters.merchantIds.length > 0 ? filters.merchantIds : undefined,
+          pgs: filters.pgs.length > 0 ? filters.pgs : undefined,
+          banks: filters.banks.length > 0 ? filters.banks : undefined,
+          cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
+        };
+        if (_useBackend) {
+          if (!backendUploadId) throw new Error('Missing backend upload id');
+          return fetchBackendTimeBounds(backendUploadId, eff);
         }
+        await dbManager.init();
+        return dbManager.getFilteredTimeBounds(eff);
+      },
 
-        // Try to resume an existing partial upload if we have one persisted and it matches the file.
-        const { fileNames, fileSizes, backendUploadId } = get();
-        const canResume =
-          Boolean(backendUploadId) &&
-          fileNames?.[0] === file.name &&
-          fileSizes?.[0] === file.size;
+      setRawTransactions: (transactions) => {
+        set({ rawTransactions: transactions });
+        void get().applyFilters();
+      },
 
-        const { uploadId, storedFileId } = await uploadFileInChunks(file, progressCallback, {
-          // Use 3MB chunks for Vercel compatibility (Vercel has 4.5MB body size limit)
-          chunkSizeBytes: 3 * 1024 * 1024,
-          uploadId: canResume ? backendUploadId! : undefined,
-          onUploadId: (id) => {
-            // Persist early so a refresh/crash can resume.
-            set({ backendUploadId: id, fileNames: [file.name], fileSizes: [file.size] });
-          },
-          cleanupOnError: false,
-        });
+      loadDataFromFile: async (file: File) => {
+        set({ isLoading: true, error: null, progress: null, analysisStage: null });
 
-        // Kick off a backend-side full-file analysis in the background (best-effort).
-        // The UI can continue instantly on a bounded sample while analysis runs.
-        void fetch(`/api/uploads/${uploadId}/analysis`, { method: 'POST' }).catch(() => {});
+        try {
+          await dbManager.init();
+          await dbManager.clear(); // Clear previous data
 
-        // Always persist backend ids.
-        set({
-          backendUploadId: uploadId,
-          backendStoredFileId: storedFileId,
-        });
+          const fileSizeMB = file.size / 1024 / 1024;
+          console.log('Loading file:', file.name, 'Size:', fileSizeMB.toFixed(2), 'MB');
 
-        // Wait for upload session to be fully completed BEFORE any API calls
-        // This prevents 404 errors due to race conditions on serverless platforms
-        let sessionReady = false;
-        let retries = 0;
-        const maxRetries = 15; // Increased retries for slower serverless environments
-        while (!sessionReady && retries < maxRetries) {
-          try {
-            const sessionRes = await fetch(`/api/uploads/${uploadId}`);
-            if (sessionRes.ok) {
-              const sessionData = await sessionRes.json();
-              if (sessionData.status === 'completed' && sessionData.storedFileId) {
-                sessionReady = true;
-                break;
+          const fileExtension = file.name.split('.').pop()?.toLowerCase();
+
+          // For large files we always do a backend-resumable chunked upload first.
+          // Then we *always* try to ingest into IndexedDB for full interactivity (all features).
+          // IndexedDB can handle multi-GB files (browsers typically allow 50% of disk space).
+          // If browser quota/memory can't handle it, we fall back to a bounded sample (still stable).
+          const backendUploadThresholdBytes = 100 * 1024 * 1024; // 100MB
+          // Removed size limit - IndexedDB can handle very large files (2GB+)
+          // Browser quota limits will be handled gracefully with error messages
+          const shouldUseBackendUpload = fileExtension === 'csv' && file.size >= backendUploadThresholdBytes;
+
+          // For files > 100MB, use IndexedDB streaming mode
+          const useIndexedDBMode = !shouldUseBackendUpload && (file.size > 100 * 1024 * 1024 || fileSizeMB > 100);
+          let totalRows = 0;
+
+          const progressCallback = (progress: ProcessingProgress) => {
+            set({ progress });
+          };
+
+          if (shouldUseBackendUpload) {
+            // For CSVs >= 100MB: use backend mode (upload + server-side metrics/sampling).
+            // This avoids browser storage/quota issues entirely.
+            const maxSampleRows = 100000;
+            set({
+              // Keep `_useIndexedDB: true` so existing UI treats this as "large dataset mode".
+              // Under the hood we branch on `_useBackend` for all large-mode operations.
+              _useIndexedDB: true,
+              _useBackend: true,
+              _skipPersistence: true,
+              isSampledDataset: false,
+              sampledFromBytes: 0,
+              backendUploadId: null,
+              backendStoredFileId: null,
+            });
+
+            // For now, backend sampling expects CSV. (XLSX cannot be streamed safely in Node without full load.)
+            if (fileExtension !== 'csv') {
+              throw new Error('Large files must be uploaded as CSV for safe streaming. Please export as CSV and try again.');
+            }
+
+            // Try to resume an existing partial upload if we have one persisted and it matches the file.
+            const { fileNames, fileSizes, backendUploadId } = get();
+            const canResume =
+              Boolean(backendUploadId) &&
+              fileNames?.[0] === file.name &&
+              fileSizes?.[0] === file.size;
+
+            const { uploadId, storedFileId } = await uploadFileInChunks(file, progressCallback, {
+              // Use 3MB chunks for Vercel compatibility (Vercel has 4.5MB body size limit)
+              chunkSizeBytes: 3 * 1024 * 1024,
+              uploadId: canResume ? backendUploadId! : undefined,
+              onUploadId: (id) => {
+                // Persist early so a refresh/crash can resume.
+                set({ backendUploadId: id, fileNames: [file.name], fileSizes: [file.size] });
+              },
+              cleanupOnError: false,
+            });
+
+            // Kick off a backend-side full-file analysis in the background (best-effort).
+            // The UI can continue instantly on a bounded sample while analysis runs.
+            void fetch(`/api/uploads/${uploadId}/analysis`, { method: 'POST' }).catch(() => { });
+
+            // Always persist backend ids.
+            set({
+              backendUploadId: uploadId,
+              backendStoredFileId: storedFileId,
+            });
+
+            // Wait for upload session to be fully completed BEFORE any API calls
+            // This prevents 404 errors due to race conditions on serverless platforms
+            let sessionReady = false;
+            let retries = 0;
+            const maxRetries = 60; // Increased retries for slower processing (up to ~5 mins)
+            while (!sessionReady && retries < maxRetries) {
+              try {
+                const sessionRes = await fetch(`/api/uploads/${uploadId}`);
+                if (sessionRes.ok) {
+                  const sessionData = await sessionRes.json();
+                  if (sessionData.status === 'completed' && sessionData.storedFileId) {
+                    sessionReady = true;
+                    break;
+                  }
+                }
+              } catch {
+                // Continue retrying
+              }
+              retries++;
+              if (!sessionReady) {
+                // Exponential backoff: 500ms... cap at 2s
+                const delay = Math.min(500 + (retries * 500), 2000);
+                await new Promise(resolve => setTimeout(resolve, delay));
               }
             }
-          } catch {
-            // Continue retrying
-          }
-          retries++;
-          if (!sessionReady) {
-            // Exponential backoff: 500ms, 1000ms, 1500ms, etc.
-            await new Promise(resolve => setTimeout(resolve, 500 * (retries + 1)));
-          }
-        }
 
-        if (!sessionReady) {
-          console.warn(`Session ${uploadId} not ready after ${maxRetries} retries, proceeding anyway`);
-        }
+            if (!sessionReady) {
+              // If still not ready after ~3-5 mins, we can't proceed safely.
+              throw new Error(`Server processing time out. Upload ${uploadId} is taking too long to merge. Please try again later.`);
+            }
 
-        // Pull a bounded sample from the stored file for tab-specific charts/tables.
-        // Aggregates (global + trends) will come from backend metrics.
-        // fetchBackendSample already has retry logic, but we wait for session to be ready first
-        const sample = await fetchBackendSample(uploadId, maxSampleRows);
-        set({
-          _useIndexedDB: true,
-          _useBackend: true,
-          rawTransactions: sample.transactions,
-          // We'll update transactionCount from backend metrics (full-file count),
-          // but keep sample length as a temporary non-zero value for UI readiness.
-          transactionCount: sample.transactions.length,
-          fileNames: [file.name],
-          fileSizes: [file.size],
-          backendUploadId: uploadId,
-          backendStoredFileId: storedFileId || sample.storedFileId,
-          isSampledDataset: true,
-          sampledFromBytes: file.size,
-          progress: { processed: sample.transactions.length, total: sample.transactions.length, percentage: 100, stage: 'complete' },
-          _skipPersistence: false,
-        });
-
-        if (sessionReady) {
-          await get().applyFilters();
-        } else {
-          // If session not ready after retries, still try to apply filters but with error handling
-          try {
-            await get().applyFilters();
-          } catch (error: any) {
-            console.warn('Failed to apply filters immediately after upload, will retry:', error);
-            // Retry after a delay
-            setTimeout(() => {
-              get().applyFilters().catch((e) => {
-                console.error('Error applying filters after retry:', e);
-              });
-            }, 2000);
-          }
-        }
-
-        // Best-effort: update full-file metrics in the background (so totals are accurate).
-        // This may take time for multi-GB files; we keep the UI responsive.
-        void (async () => {
-          try {
-            // Wait a bit more to ensure session is fully committed
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            const eff = {
-              startDate: get().filters.dateRange.start || undefined,
-              endDate: get().filters.dateRange.end || undefined,
-              paymentModes: get().filters.paymentModes.length > 0 ? get().filters.paymentModes : undefined,
-              merchantIds: get().filters.merchantIds.length > 0 ? get().filters.merchantIds : undefined,
-              pgs: get().filters.pgs.length > 0 ? get().filters.pgs : undefined,
-              banks: get().filters.banks.length > 0 ? get().filters.banks : undefined,
-              cardTypes: get().filters.cardTypes.length > 0 ? get().filters.cardTypes : undefined,
-            };
-            const m = await fetchBackendMetrics(uploadId, eff);
+            // Pull a bounded sample from the stored file for tab-specific charts/tables.
+            // Aggregates (global + trends) will come from backend metrics.
+            // fetchBackendSample already has retry logic, but we wait for session to be ready first
+            const sample = await fetchBackendSample(uploadId, maxSampleRows);
             set({
-              transactionCount: m.filteredTransactionCount,
-              filteredTransactionCount: m.filteredTransactionCount,
-              globalMetrics: m.globalMetrics,
-              dailyTrends: m.dailyTrends,
+              _useIndexedDB: true,
+              _useBackend: true,
+              rawTransactions: sample.transactions,
+              // We'll update transactionCount from backend metrics (full-file count),
+              // but keep sample length as a temporary non-zero value for UI readiness.
+              transactionCount: sample.transactions.length,
+              fileNames: [file.name],
+              fileSizes: [file.size],
+              backendUploadId: uploadId,
+              backendStoredFileId: storedFileId || sample.storedFileId,
+              isSampledDataset: true,
+              sampledFromBytes: file.size,
+              progress: { processed: sample.transactions.length, total: sample.transactions.length, percentage: 100, stage: 'complete' },
+              _skipPersistence: false,
             });
-          } catch (error: any) {
-            console.warn('Failed to fetch backend metrics in background:', error);
-            // Retry once more after a delay
-            setTimeout(async () => {
+
+            if (sessionReady) {
+              await get().applyFilters();
+            } else {
+              // If session not ready after retries, still try to apply filters but with error handling
               try {
+                await get().applyFilters();
+              } catch (error: any) {
+                console.warn('Failed to apply filters immediately after upload, will retry:', error);
+                // Retry after a delay
+                setTimeout(() => {
+                  get().applyFilters().catch((e) => {
+                    console.error('Error applying filters after retry:', e);
+                  });
+                }, 2000);
+              }
+            }
+
+            // Best-effort: update full-file metrics in the background (so totals are accurate).
+            // This may take time for multi-GB files; we keep the UI responsive.
+            void (async () => {
+              try {
+                // Wait a bit more to ensure session is fully committed
+                await new Promise(resolve => setTimeout(resolve, 1000));
                 const eff = {
                   startDate: get().filters.dateRange.start || undefined,
                   endDate: get().filters.dateRange.end || undefined,
@@ -820,460 +801,484 @@ export const useStore = create<StoreState>()(
                   globalMetrics: m.globalMetrics,
                   dailyTrends: m.dailyTrends,
                 });
-              } catch {
-                // Ignore final failure
+              } catch (error: any) {
+                console.warn('Failed to fetch backend metrics in background:', error);
+                // Retry once more after a delay
+                setTimeout(async () => {
+                  try {
+                    const eff = {
+                      startDate: get().filters.dateRange.start || undefined,
+                      endDate: get().filters.dateRange.end || undefined,
+                      paymentModes: get().filters.paymentModes.length > 0 ? get().filters.paymentModes : undefined,
+                      merchantIds: get().filters.merchantIds.length > 0 ? get().filters.merchantIds : undefined,
+                      pgs: get().filters.pgs.length > 0 ? get().filters.pgs : undefined,
+                      banks: get().filters.banks.length > 0 ? get().filters.banks : undefined,
+                      cardTypes: get().filters.cardTypes.length > 0 ? get().filters.cardTypes : undefined,
+                    };
+                    const m = await fetchBackendMetrics(uploadId, eff);
+                    set({
+                      transactionCount: m.filteredTransactionCount,
+                      filteredTransactionCount: m.filteredTransactionCount,
+                      globalMetrics: m.globalMetrics,
+                      dailyTrends: m.dailyTrends,
+                    });
+                  } catch {
+                    // Ignore final failure
+                  }
+                }, 3000);
               }
-            }, 3000);
+            })();
+            return;
           }
-        })();
-        return;
-      }
 
-      // Process and stream directly to IndexedDB for large files
-      if (useIndexedDBMode) {
-        console.log('Using IndexedDB streaming mode for large file');
-        set({ _useIndexedDB: true, _useBackend: false, _skipPersistence: true, isSampledDataset: false, sampledFromBytes: 0, backendUploadId: null, backendStoredFileId: null });
-        
-        if (fileExtension === 'csv') {
-          // Stream CSV and write directly to IndexedDB
-          await streamCSVToIndexedDB(file, progressCallback);
-        } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
-          // For Excel, we still need to load it, but process in chunks
-          const rawData = await processExcelFile(file, progressCallback);
-          totalRows = rawData.length;
-          
-          // Process and write in chunks
-          set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
-          await processAndStoreChunks(rawData, progressCallback);
-        } else {
-          throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
-        }
-      } else {
-        // Small file mode - load into memory
-        set({ _useIndexedDB: false, _useBackend: false, isSampledDataset: false, sampledFromBytes: 0, backendUploadId: null, backendStoredFileId: null });
-        let rawData: any[] = [];
-        
-        if (fileExtension === 'csv') {
-          const Papa = (await import('papaparse')).default;
-          const text = await file.text();
-          const result = Papa.parse(text, {
-            header: true,
-            skipEmptyLines: true,
-            transformHeader: (header) => header.trim().toLowerCase(),
-          });
-          rawData = result.data as any[];
-          set({ progress: { processed: rawData.length, total: rawData.length, percentage: 50, stage: 'parsing' } });
-        } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
-          rawData = await processExcelFile(file, progressCallback);
-        } else {
-          throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
-        }
-        
-        if (rawData.length === 0) {
-          throw new Error('File appears to be empty. Please check the file format.');
-        }
-        
-        totalRows = rawData.length;
-        console.log('Normalizing data...');
-        set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
-        
-        const allNormalized = await workerManager.processData(
-          rawData,
-          (progress) => {
-            progressCallback({
-              ...progress,
-              percentage: 60 + Math.round((progress.percentage / 100) * 30),
+          // Process and stream directly to IndexedDB for large files
+          if (useIndexedDBMode) {
+            console.log('Using IndexedDB streaming mode for large file');
+            set({ _useIndexedDB: true, _useBackend: false, _skipPersistence: true, isSampledDataset: false, sampledFromBytes: 0, backendUploadId: null, backendStoredFileId: null });
+
+            if (fileExtension === 'csv') {
+              // Stream CSV and write directly to IndexedDB
+              await streamCSVToIndexedDB(file, progressCallback);
+            } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+              // For Excel, we still need to load it, but process in chunks
+              const rawData = await processExcelFile(file, progressCallback);
+              totalRows = rawData.length;
+
+              // Process and write in chunks
+              set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
+              await processAndStoreChunks(rawData, progressCallback);
+            } else {
+              throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
+            }
+          } else {
+            // Small file mode - load into memory
+            set({ _useIndexedDB: false, _useBackend: false, isSampledDataset: false, sampledFromBytes: 0, backendUploadId: null, backendStoredFileId: null });
+            let rawData: any[] = [];
+
+            if (fileExtension === 'csv') {
+              const Papa = (await import('papaparse')).default;
+              const text = await file.text();
+              const result = Papa.parse(text, {
+                header: true,
+                skipEmptyLines: true,
+                transformHeader: (header) => header.trim().toLowerCase(),
+              });
+              rawData = result.data as any[];
+              set({ progress: { processed: rawData.length, total: rawData.length, percentage: 50, stage: 'parsing' } });
+            } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+              rawData = await processExcelFile(file, progressCallback);
+            } else {
+              throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
+            }
+
+            if (rawData.length === 0) {
+              throw new Error('File appears to be empty. Please check the file format.');
+            }
+
+            totalRows = rawData.length;
+            console.log('Normalizing data...');
+            set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
+
+            const allNormalized = await workerManager.processData(
+              rawData,
+              (progress) => {
+                progressCallback({
+                  ...progress,
+                  percentage: 60 + Math.round((progress.percentage / 100) * 30),
+                });
+              },
+              20000
+            );
+
+            set({
+              rawTransactions: allNormalized,
+              transactionCount: allNormalized.length,
             });
-          },
-          20000
-        );
-        
-        set({ 
-          rawTransactions: allNormalized,
-          transactionCount: allNormalized.length,
+          }
+
+          // Get final count from IndexedDB if using IndexedDB mode
+          const finalCount = useIndexedDBMode ? await dbManager.getCount() : totalRows;
+
+          if (finalCount === 0) {
+            throw new Error(
+              'No rows were written to browser storage (IndexedDB). Please re-export the file and re-upload. ' +
+              'If your CSV contains an "id" column, this app uses its own internal primary key and should handle it, ' +
+              'but an empty count usually indicates a parsing or storage failure.'
+            );
+          }
+
+          set({
+            fileNames: [file.name],
+            fileSizes: [file.size],
+            transactionCount: finalCount,
+            progress: { processed: finalCount, total: finalCount, percentage: 100, stage: 'complete' },
+            _skipPersistence: false,
+          });
+
+          console.log('File loaded and processed successfully, transactions:', finalCount);
+
+          // Apply filters
+          setTimeout(() => {
+            get().applyFilters().catch((error) => {
+              console.error('Error applying filters after file load:', error);
+            });
+          }, 50);
+
+        } catch (error: any) {
+          console.error('Error in loadDataFromFile:', error);
+          set({
+            error: error.message || 'Failed to load file. Please check the console for details.',
+            progress: null,
+          });
+          throw error;
+        } finally {
+          set({ isLoading: false });
+        }
+      },
+
+      restoreFromIndexedDB: async () => {
+        try {
+          const { _useBackend, backendUploadId } = get();
+          if (_useBackend) {
+            // Backend mode: no browser DB restore needed; just recompute aggregates.
+            if (!backendUploadId) return { status: 'missing', count: 0 };
+            await get().applyFilters();
+            return { status: 'restored', count: get().transactionCount };
+          }
+
+          await dbManager.init();
+          const count = await dbManager.getCount();
+          if (count > 0) {
+            set({ _useIndexedDB: true, transactionCount: count });
+            await get().applyFilters();
+            return { status: 'restored', count };
+          }
+          return { status: 'missing', count: 0 };
+        } catch (e: any) {
+          const msg = e?.message ? String(e.message) : 'Failed to access IndexedDB';
+          set({ error: msg });
+          return { status: 'error', error: msg };
+        }
+      },
+
+      setFilters: (newFilters) => {
+        set((state) => ({
+          filters: { ...state.filters, ...newFilters },
+        }));
+
+        // Debounce filter application to prevent excessive recomputations
+        cancelPendingFilter();
+        filterTimeout = setTimeout(() => {
+          void get().applyFilters();
+          filterTimeout = null;
+        }, 100); // 100ms debounce for faster response
+      },
+
+      resetFilters: () => {
+        set({ filters: defaultFilters });
+        cancelPendingFilter();
+        // Apply immediately for reset - handle async properly
+        void get().applyFilters().catch((error) => {
+          console.error('Error applying filters after reset:', error);
         });
-      }
-      
-      // Get final count from IndexedDB if using IndexedDB mode
-      const finalCount = useIndexedDBMode ? await dbManager.getCount() : totalRows;
+      },
 
-      if (finalCount === 0) {
-        throw new Error(
-          'No rows were written to browser storage (IndexedDB). Please re-export the file and re-upload. ' +
-          'If your CSV contains an "id" column, this app uses its own internal primary key and should handle it, ' +
-          'but an empty count usually indicates a parsing or storage failure.'
-        );
-      }
-      
-      set({ 
-        fileNames: [file.name],
-        fileSizes: [file.size],
-        transactionCount: finalCount,
-        progress: { processed: finalCount, total: finalCount, percentage: 100, stage: 'complete' },
-        _skipPersistence: false,
-      });
-      
-      console.log('File loaded and processed successfully, transactions:', finalCount);
-      
-      // Apply filters
-      setTimeout(() => {
-        get().applyFilters().catch((error) => {
-          console.error('Error applying filters after file load:', error);
-        });
-      }, 50);
-      
-    } catch (error: any) {
-      console.error('Error in loadDataFromFile:', error);
-      set({ 
-        error: error.message || 'Failed to load file. Please check the console for details.',
-        progress: null,
-      });
-      throw error;
-    } finally {
-      set({ isLoading: false });
-    }
-  },
-  
-  restoreFromIndexedDB: async () => {
-    try {
-      const { _useBackend, backendUploadId } = get();
-      if (_useBackend) {
-        // Backend mode: no browser DB restore needed; just recompute aggregates.
-        if (!backendUploadId) return { status: 'missing', count: 0 };
-        await get().applyFilters();
-        return { status: 'restored', count: get().transactionCount };
-      }
+      applyFilters: async () => {
+        const { rawTransactions, filters, _useIndexedDB, transactionCount, _useBackend, backendUploadId } = get();
 
-      await dbManager.init();
-      const count = await dbManager.getCount();
-      if (count > 0) {
-        set({ _useIndexedDB: true, transactionCount: count });
-        await get().applyFilters();
-        return { status: 'restored', count };
-      }
-      return { status: 'missing', count: 0 };
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : 'Failed to access IndexedDB';
-      set({ error: msg });
-      return { status: 'error', error: msg };
-    }
-  },
-  
-  setFilters: (newFilters) => {
-    set((state) => ({
-      filters: { ...state.filters, ...newFilters },
-    }));
-    
-    // Debounce filter application to prevent excessive recomputations
-    cancelPendingFilter();
-    filterTimeout = setTimeout(() => {
-      void get().applyFilters();
-      filterTimeout = null;
-    }, 100); // 100ms debounce for faster response
-  },
-  
-  resetFilters: () => {
-    set({ filters: defaultFilters });
-    cancelPendingFilter();
-    // Apply immediately for reset - handle async properly
-    void get().applyFilters().catch((error) => {
-      console.error('Error applying filters after reset:', error);
-    });
-  },
-  
-  applyFilters: async () => {
-    const { rawTransactions, filters, _useIndexedDB, transactionCount, _useBackend, backendUploadId } = get();
-    
-    const totalCount = _useIndexedDB ? transactionCount : rawTransactions.length;
-    
-    // Backend mode can have transactionCount=0 after rehydrate; we still have data server-side.
-    if (!_useBackend && totalCount === 0) {
-      set({ filteredTransactions: [], filteredTransactionCount: 0, globalMetrics: null, dailyTrends: [], analysisStage: null });
-      return;
-    }
-    if (_useBackend && !backendUploadId) {
-      set({ filteredTransactions: [], filteredTransactionCount: 0, globalMetrics: null, dailyTrends: [], analysisStage: null });
-      return;
-    }
+        const totalCount = _useIndexedDB ? transactionCount : rawTransactions.length;
 
-    // Signal UI that we're doing heavy work post-upload / post-filter change
-    set({ analysisStage: 'FILTERING' });
+        // Backend mode can have transactionCount=0 after rehydrate; we still have data server-side.
+        if (!_useBackend && totalCount === 0) {
+          set({ filteredTransactions: [], filteredTransactionCount: 0, globalMetrics: null, dailyTrends: [], analysisStage: null });
+          return;
+        }
+        if (_useBackend && !backendUploadId) {
+          set({ filteredTransactions: [], filteredTransactionCount: 0, globalMetrics: null, dailyTrends: [], analysisStage: null });
+          return;
+        }
 
-    if (_useIndexedDB) {
-      // For large datasets in IndexedDB, compute count + metrics in ONE streaming pass
-      // to avoid double-scanning and to prevent loading huge arrays into memory.
-      set({ analysisStage: 'COMPUTING', filteredTransactions: [] });
-      const effFilters = {
-        startDate: filters.dateRange.start || undefined,
-        endDate: filters.dateRange.end || undefined,
-        paymentModes: filters.paymentModes.length > 0 ? filters.paymentModes : undefined,
-        merchantIds: filters.merchantIds.length > 0 ? filters.merchantIds : undefined,
-        pgs: filters.pgs.length > 0 ? filters.pgs : undefined,
-        banks: filters.banks.length > 0 ? filters.banks : undefined,
-        cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
-      };
+        // Signal UI that we're doing heavy work post-upload / post-filter change
+        set({ analysisStage: 'FILTERING' });
 
-      if (_useBackend) {
-        if (!backendUploadId) throw new Error('Missing backend upload id');
-        // fetchBackendMetrics already has retry logic built in
-        const m = await fetchBackendMetrics(backendUploadId, effFilters);
+        if (_useIndexedDB) {
+          // For large datasets in IndexedDB, compute count + metrics in ONE streaming pass
+          // to avoid double-scanning and to prevent loading huge arrays into memory.
+          set({ analysisStage: 'COMPUTING', filteredTransactions: [] });
+          const effFilters = {
+            startDate: filters.dateRange.start || undefined,
+            endDate: filters.dateRange.end || undefined,
+            paymentModes: filters.paymentModes.length > 0 ? filters.paymentModes : undefined,
+            merchantIds: filters.merchantIds.length > 0 ? filters.merchantIds : undefined,
+            pgs: filters.pgs.length > 0 ? filters.pgs : undefined,
+            banks: filters.banks.length > 0 ? filters.banks : undefined,
+            cardTypes: filters.cardTypes.length > 0 ? filters.cardTypes : undefined,
+          };
+
+          if (_useBackend) {
+            if (!backendUploadId) throw new Error('Missing backend upload id');
+            // fetchBackendMetrics already has retry logic built in
+            const m = await fetchBackendMetrics(backendUploadId, effFilters);
+            console.log('[useStore] Backend metrics received:', m);
+
+            set({
+              filteredTransactionCount: m.filteredTransactionCount,
+              globalMetrics: m.globalMetrics,
+              dailyTrends: m.dailyTrends,
+              filteredTransactions: [], // Clear local txs to force chart components to use globalMetrics
+              analysisStage: null,
+            });
+            return;
+          }
+
+          await dbManager.init();
+          const agg = await dbManager.aggregateMetrics(effFilters);
+
+          const globalMetrics = {
+            totalCount: agg.totalCount,
+            successCount: agg.successCount,
+            failedCount: agg.failedCount,
+            userDroppedCount: agg.userDroppedCount,
+            sr: calculateSR(agg.successCount, agg.totalCount),
+            successGmv: agg.successGmv,
+            failedPercent: calculateSR(agg.failedCount, agg.totalCount),
+            userDroppedPercent: calculateSR(agg.userDroppedCount, agg.totalCount),
+          };
+
+          const dailyTrends = agg.dailyTrends.map((d) => ({
+            ...d,
+            sr: calculateSR(d.successCount, d.volume),
+          }));
+
+          set({
+            filteredTransactionCount: agg.totalCount,
+            globalMetrics,
+            dailyTrends,
+            analysisStage: null,
+          });
+          return;
+        } else {
+          // Small dataset - filter in memory
+          const filtered: Transaction[] = [];
+
+          const endDate = filters.dateRange.end ? new Date(filters.dateRange.end) : null;
+          if (endDate) endDate.setHours(23, 59, 59, 999);
+
+          const paymentModeSet = filters.paymentModes.length > 0 ? new Set(filters.paymentModes) : null;
+          const merchantIdSet = filters.merchantIds.length > 0 ? new Set(filters.merchantIds) : null;
+          const pgSet = filters.pgs.length > 0 ? new Set(filters.pgs) : null;
+          const bankSet = filters.banks.length > 0 ? new Set(filters.banks) : null;
+          const cardTypeSet = filters.cardTypes.length > 0 ? new Set(filters.cardTypes) : null;
+
+          const yieldEvery = rawTransactions.length > 200000 ? 5000 : 10000;
+
+          for (let i = 0; i < rawTransactions.length; i++) {
+            const tx = rawTransactions[i];
+
+            const pg = String(tx.pg || '').trim().toUpperCase();
+            if (pg === 'N/A' || pg === 'NA' || pg === '') continue;
+
+            if (filters.dateRange.start && tx.txtime < filters.dateRange.start) continue;
+            if (endDate && tx.txtime > endDate) continue;
+
+            if (paymentModeSet && !paymentModeSet.has(tx.paymentmode)) continue;
+
+            if (merchantIdSet) {
+              const merchantId = String(tx.merchantid || '').trim();
+              if (!merchantIdSet.has(merchantId)) continue;
+            }
+
+            if (pgSet && !pgSet.has(tx.pg)) continue;
+
+            if (bankSet) {
+              const flow = classifyUPIFlow(tx.bankname);
+              if (!bankSet.has(flow) && !bankSet.has(tx.bankname)) continue;
+            }
+
+            if (cardTypeSet && !cardTypeSet.has(tx.cardtype)) continue;
+
+            filtered.push(tx);
+
+            if (i % yieldEvery === 0) {
+              // Yield to keep UI responsive
+              // eslint-disable-next-line no-await-in-loop
+              await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            }
+          }
+
+          set({ filteredTransactions: filtered, filteredTransactionCount: filtered.length });
+        }
+
+        // Defer metrics computation
+        cancelPendingMetrics();
+        set({ analysisStage: 'COMPUTING' });
+        if (typeof requestAnimationFrame !== 'undefined') {
+          const rafId = requestAnimationFrame(() => {
+            if (!isComputing) {
+              isComputing = true;
+              void get().computeMetrics().finally(() => {
+                isComputing = false;
+              });
+            }
+            metricsTimeout = null;
+          });
+          metricsTimeout = rafId;
+        } else {
+          metricsTimeout = setTimeout(() => {
+            if (!isComputing) {
+              isComputing = true;
+              void get().computeMetrics().finally(() => {
+                isComputing = false;
+              });
+            }
+            metricsTimeout = null;
+          }, 0);
+        }
+      },
+
+      computeMetrics: async () => {
+        const { filteredTransactions, _useIndexedDB, filteredTransactionCount, _useBackend } = get();
+
+        const hasData = _useIndexedDB ? filteredTransactionCount > 0 : filteredTransactions.length > 0;
+
+        if (!hasData) {
+          set({ globalMetrics: null, dailyTrends: [], analysisStage: null });
+          return;
+        }
+
+        // Compute metrics on main thread
+        const { computeMetricsSync } = await import('@/lib/filter-utils');
+
+        if (_useIndexedDB) {
+          // Keep as a safe fallback: in IndexedDB mode, metrics are computed in applyFilters()
+          // via dbManager.aggregateMetrics(), so we just clear the stage here.
+          set({ analysisStage: null });
+        } else {
+          // Small dataset - compute directly
+          const result = computeMetricsSync(filteredTransactions);
+          set({ globalMetrics: result.globalMetrics, dailyTrends: result.dailyTrends, analysisStage: null });
+        }
+      },
+
+      addDataFromFile: async (file: File) => {
+        set({ isLoading: true, error: null, progress: null });
+
+        try {
+          const fileSizeMB = file.size / 1024 / 1024;
+          console.log('Adding file:', file.name, 'Size:', fileSizeMB.toFixed(2), 'MB');
+
+          // Adding very large files on top of an existing dataset is not supported safely.
+          // Use Replace so we can stream/ingest deterministically (and/or use backend upload path).
+          if (file.size >= 100 * 1024 * 1024) {
+            throw new Error('For files ≥100MB, please use Replace (top right) instead of Add. Large files are uploaded via backend chunked upload and may exceed safe in-browser merge limits.');
+          }
+
+          // Allow multi-GB files, but warn: these should be CSV and will stream through IndexedDB.
+          if (fileSizeMB > 6000) {
+            throw new Error('File is too large (>6GB). Please split your data into smaller files.');
+          }
+
+          const fileExtension = file.name.split('.').pop()?.toLowerCase();
+          let rawData: any[] = [];
+
+          const progressCallback = (progress: ProcessingProgress) => {
+            set({ progress });
+          };
+
+          if (fileExtension === 'csv') {
+            const Papa = (await import('papaparse')).default;
+            const text = await file.text();
+            const result = Papa.parse(text, {
+              header: true,
+              skipEmptyLines: true,
+              transformHeader: (header) => header.trim().toLowerCase(),
+            });
+            rawData = result.data as any[];
+            set({ progress: { processed: rawData.length, total: rawData.length, percentage: 50, stage: 'parsing' } });
+            console.log('CSV parsed, rows:', rawData.length);
+          } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+            rawData = await processExcelFile(file, progressCallback);
+            console.log('Excel parsed, rows:', rawData.length);
+          } else {
+            throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
+          }
+
+          if (rawData.length === 0) {
+            throw new Error('File appears to be empty. Please check the file format.');
+          }
+
+          console.log('Normalizing data...');
+          set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
+
+          // Process in chunks
+          const normalizedData = await workerManager.processData(
+            rawData,
+            (progress) => {
+              progressCallback({
+                ...progress,
+                percentage: 60 + Math.round((progress.percentage / 100) * 30),
+              });
+            },
+            rawData.length > 50000 ? 10000 : 20000
+          );
+
+          console.log('Data normalized, transactions:', normalizedData.length);
+
+          const { rawTransactions, fileNames, fileSizes } = get();
+          set({
+            rawTransactions: [...rawTransactions, ...normalizedData],
+            fileNames: [...fileNames, file.name],
+            fileSizes: [...fileSizes, file.size],
+            progress: { processed: normalizedData.length, total: normalizedData.length, percentage: 100, stage: 'complete' },
+          });
+
+          setTimeout(() => {
+            get().applyFilters();
+            console.log('File added and processed successfully');
+          }, 100);
+        } catch (error: any) {
+          console.error('Error in addDataFromFile:', error);
+          set({
+            error: error.message || 'Failed to add file. Please check the console for details.',
+            progress: null,
+          });
+          throw error;
+        } finally {
+          set({ isLoading: false });
+        }
+      },
+
+      clearData: async () => {
+        // Cancel any ongoing worker processing
+        workerManager.cancel();
+        await dbManager.init();
+        await dbManager.clear();
         set({
-          filteredTransactionCount: m.filteredTransactionCount,
-          globalMetrics: m.globalMetrics,
-          dailyTrends: m.dailyTrends,
+          rawTransactions: [],
+          filteredTransactions: [],
+          transactionCount: 0,
+          filteredTransactionCount: 0,
+          globalMetrics: null,
+          dailyTrends: [],
+          fileNames: [],
+          fileSizes: [],
+          isSampledDataset: false,
+          sampledFromBytes: 0,
+          backendUploadId: null,
+          backendStoredFileId: null,
+          error: null,
+          progress: null,
+          filters: defaultFilters,
           analysisStage: null,
+          _skipPersistence: false,
+          _useIndexedDB: false,
+          _useBackend: false,
         });
-        return;
-      }
+      },
 
-      await dbManager.init();
-      const agg = await dbManager.aggregateMetrics(effFilters);
-
-      const globalMetrics = {
-        totalCount: agg.totalCount,
-        successCount: agg.successCount,
-        failedCount: agg.failedCount,
-        userDroppedCount: agg.userDroppedCount,
-        sr: calculateSR(agg.successCount, agg.totalCount),
-        successGmv: agg.successGmv,
-        failedPercent: calculateSR(agg.failedCount, agg.totalCount),
-        userDroppedPercent: calculateSR(agg.userDroppedCount, agg.totalCount),
-      };
-
-      const dailyTrends = agg.dailyTrends.map((d) => ({
-        ...d,
-        sr: calculateSR(d.successCount, d.volume),
-      }));
-
-      set({
-        filteredTransactionCount: agg.totalCount,
-        globalMetrics,
-        dailyTrends,
-        analysisStage: null,
-      });
-      return;
-    } else {
-      // Small dataset - filter in memory
-      const filtered: Transaction[] = [];
-
-      const endDate = filters.dateRange.end ? new Date(filters.dateRange.end) : null;
-      if (endDate) endDate.setHours(23, 59, 59, 999);
-
-      const paymentModeSet = filters.paymentModes.length > 0 ? new Set(filters.paymentModes) : null;
-      const merchantIdSet = filters.merchantIds.length > 0 ? new Set(filters.merchantIds) : null;
-      const pgSet = filters.pgs.length > 0 ? new Set(filters.pgs) : null;
-      const bankSet = filters.banks.length > 0 ? new Set(filters.banks) : null;
-      const cardTypeSet = filters.cardTypes.length > 0 ? new Set(filters.cardTypes) : null;
-
-      const yieldEvery = rawTransactions.length > 200000 ? 5000 : 10000;
-
-      for (let i = 0; i < rawTransactions.length; i++) {
-        const tx = rawTransactions[i];
-
-        const pg = String(tx.pg || '').trim().toUpperCase();
-        if (pg === 'N/A' || pg === 'NA' || pg === '') continue;
-
-        if (filters.dateRange.start && tx.txtime < filters.dateRange.start) continue;
-        if (endDate && tx.txtime > endDate) continue;
-
-        if (paymentModeSet && !paymentModeSet.has(tx.paymentmode)) continue;
-
-        if (merchantIdSet) {
-          const merchantId = String(tx.merchantid || '').trim();
-          if (!merchantIdSet.has(merchantId)) continue;
-        }
-
-        if (pgSet && !pgSet.has(tx.pg)) continue;
-
-        if (bankSet) {
-          const flow = classifyUPIFlow(tx.bankname);
-          if (!bankSet.has(flow) && !bankSet.has(tx.bankname)) continue;
-        }
-
-        if (cardTypeSet && !cardTypeSet.has(tx.cardtype)) continue;
-
-        filtered.push(tx);
-
-        if (i % yieldEvery === 0) {
-          // Yield to keep UI responsive
-          // eslint-disable-next-line no-await-in-loop
-          await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        }
-      }
-
-      set({ filteredTransactions: filtered, filteredTransactionCount: filtered.length });
-    }
-
-    // Defer metrics computation
-    cancelPendingMetrics();
-    set({ analysisStage: 'COMPUTING' });
-    if (typeof requestAnimationFrame !== 'undefined') {
-      const rafId = requestAnimationFrame(() => {
-        if (!isComputing) {
-          isComputing = true;
-          void get().computeMetrics().finally(() => {
-            isComputing = false;
-          });
-        }
-        metricsTimeout = null;
-      });
-      metricsTimeout = rafId;
-    } else {
-      metricsTimeout = setTimeout(() => {
-        if (!isComputing) {
-          isComputing = true;
-          void get().computeMetrics().finally(() => {
-            isComputing = false;
-          });
-        }
-        metricsTimeout = null;
-      }, 0);
-    }
-  },
-  
-  computeMetrics: async () => {
-    const { filteredTransactions, _useIndexedDB, filteredTransactionCount, _useBackend } = get();
-    
-    const hasData = _useIndexedDB ? filteredTransactionCount > 0 : filteredTransactions.length > 0;
-    
-    if (!hasData) {
-      set({ globalMetrics: null, dailyTrends: [], analysisStage: null });
-      return;
-    }
-    
-    // Compute metrics on main thread
-    const { computeMetricsSync } = await import('@/lib/filter-utils');
-
-    if (_useIndexedDB) {
-      // Keep as a safe fallback: in IndexedDB mode, metrics are computed in applyFilters()
-      // via dbManager.aggregateMetrics(), so we just clear the stage here.
-      set({ analysisStage: null });
-    } else {
-      // Small dataset - compute directly
-      const result = computeMetricsSync(filteredTransactions);
-      set({ globalMetrics: result.globalMetrics, dailyTrends: result.dailyTrends, analysisStage: null });
-    }
-  },
-  
-  addDataFromFile: async (file: File) => {
-    set({ isLoading: true, error: null, progress: null });
-    
-    try {
-      const fileSizeMB = file.size / 1024 / 1024;
-      console.log('Adding file:', file.name, 'Size:', fileSizeMB.toFixed(2), 'MB');
-
-      // Adding very large files on top of an existing dataset is not supported safely.
-      // Use Replace so we can stream/ingest deterministically (and/or use backend upload path).
-      if (file.size >= 100 * 1024 * 1024) {
-        throw new Error('For files ≥100MB, please use Replace (top right) instead of Add. Large files are uploaded via backend chunked upload and may exceed safe in-browser merge limits.');
-      }
-      
-      // Allow multi-GB files, but warn: these should be CSV and will stream through IndexedDB.
-      if (fileSizeMB > 6000) {
-        throw new Error('File is too large (>6GB). Please split your data into smaller files.');
-      }
-      
-      const fileExtension = file.name.split('.').pop()?.toLowerCase();
-      let rawData: any[] = [];
-      
-      const progressCallback = (progress: ProcessingProgress) => {
-        set({ progress });
-      };
-      
-      if (fileExtension === 'csv') {
-        const Papa = (await import('papaparse')).default;
-        const text = await file.text();
-        const result = Papa.parse(text, {
-          header: true,
-          skipEmptyLines: true,
-          transformHeader: (header) => header.trim().toLowerCase(),
-        });
-        rawData = result.data as any[];
-        set({ progress: { processed: rawData.length, total: rawData.length, percentage: 50, stage: 'parsing' } });
-        console.log('CSV parsed, rows:', rawData.length);
-      } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
-        rawData = await processExcelFile(file, progressCallback);
-        console.log('Excel parsed, rows:', rawData.length);
-      } else {
-        throw new Error('Unsupported file format. Please upload CSV or XLSX file.');
-      }
-      
-      if (rawData.length === 0) {
-        throw new Error('File appears to be empty. Please check the file format.');
-      }
-      
-      console.log('Normalizing data...');
-      set({ progress: { processed: 0, total: rawData.length, percentage: 60, stage: 'normalizing' } });
-      
-      // Process in chunks
-      const normalizedData = await workerManager.processData(
-        rawData,
-        (progress) => {
-          progressCallback({
-            ...progress,
-            percentage: 60 + Math.round((progress.percentage / 100) * 30),
-          });
-        },
-        rawData.length > 50000 ? 10000 : 20000
-      );
-      
-      console.log('Data normalized, transactions:', normalizedData.length);
-      
-      const { rawTransactions, fileNames, fileSizes } = get();
-      set({ 
-        rawTransactions: [...rawTransactions, ...normalizedData],
-        fileNames: [...fileNames, file.name],
-        fileSizes: [...fileSizes, file.size],
-        progress: { processed: normalizedData.length, total: normalizedData.length, percentage: 100, stage: 'complete' },
-      });
-      
-      setTimeout(() => {
-        get().applyFilters();
-        console.log('File added and processed successfully');
-      }, 100);
-    } catch (error: any) {
-      console.error('Error in addDataFromFile:', error);
-      set({ 
-        error: error.message || 'Failed to add file. Please check the console for details.',
-        progress: null,
-      });
-      throw error;
-    } finally {
-      set({ isLoading: false });
-    }
-  },
-  
-  clearData: async () => {
-    // Cancel any ongoing worker processing
-    workerManager.cancel();
-    await dbManager.init();
-    await dbManager.clear();
-    set({
-      rawTransactions: [],
-      filteredTransactions: [],
-      transactionCount: 0,
-      filteredTransactionCount: 0,
-      globalMetrics: null,
-      dailyTrends: [],
-      fileNames: [],
-      fileSizes: [],
-      isSampledDataset: false,
-      sampledFromBytes: 0,
-      backendUploadId: null,
-      backendStoredFileId: null,
-      error: null,
-      progress: null,
-      filters: defaultFilters,
-      analysisStage: null,
-      _skipPersistence: false,
-      _useIndexedDB: false,
-      _useBackend: false,
-    });
-  },
-  
-  getFilteredTransactions: () => get().filteredTransactions,
-  getGlobalMetrics: () => get().globalMetrics,
-  getDailyTrends: () => get().dailyTrends,
+      getFilteredTransactions: () => get().filteredTransactions,
+      getGlobalMetrics: () => get().globalMetrics,
+      getDailyTrends: () => get().dailyTrends,
     }),
     {
       name: 'sr-analytics-storage',
@@ -1343,7 +1348,7 @@ export const useStore = create<StoreState>()(
         // After rehydration, check for data and restore state
         setTimeout(async () => {
           const store = useStore.getState();
-          
+
           // If we already have IndexedDB mode restored from persistence, verify and apply filters
           if (store._useIndexedDB && store.transactionCount > 0) {
             // State already restored, just apply filters
@@ -1369,7 +1374,7 @@ export const useStore = create<StoreState>()(
             }, 500);
             return;
           }
-          
+
           // If we have file metadata but no in-memory data, attempt to restore from IndexedDB.
           const hasFileMeta = Boolean(state && state.fileNames && state.fileNames.length > 0);
           const hasInMemory = Boolean(state && state.rawTransactions && state.rawTransactions.length > 0);
@@ -1383,7 +1388,7 @@ export const useStore = create<StoreState>()(
             }
             return;
           }
-          
+
           // For small files with in-memory data
           if (state && state.rawTransactions && state.rawTransactions.length > 0) {
             if (store.rawTransactions.length > 0) {

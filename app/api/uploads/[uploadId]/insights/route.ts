@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
-import csvParser from 'csv-parser';
+import * as fastcsv from 'fast-csv';
 import { parse } from 'date-fns';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
 import { ensureDatabaseReady } from '@/lib/server/db-ready';
@@ -26,32 +26,21 @@ function parseDate(value: any): Date | null {
   if (!value) return null;
   if (value instanceof Date) return value;
   if (typeof value !== 'string') return null;
-
   const trimmed = value.trim();
   if (!trimmed) return null;
 
+  // Optimized: Priority to native Date for speed
+  const d = new Date(trimmed);
+  if (!Number.isNaN(d.getTime())) return d;
+
   try {
-    const parsedA = parse(trimmed, 'MMMM d, yyyy, h:mm a', new Date());
-    if (!Number.isNaN(parsedA.getTime())) return parsedA;
-
-    const isoParsed = new Date(trimmed);
-    if (!Number.isNaN(isoParsed.getTime())) return isoParsed;
-
-    const formats = ['MMM d, yyyy, h:mm a', 'MM/dd/yyyy h:mm a', 'dd/MM/yyyy h:mm a', 'yyyy-MM-dd HH:mm:ss', 'yyyy-MM-dd'];
+    const formats = ['MMMM d, yyyy, h:mm a', 'MMM d, yyyy, h:mm a', 'MM/dd/yyyy h:mm a', 'dd/MM/yyyy h:mm a', 'yyyy-MM-dd HH:mm:ss'];
     for (const fmt of formats) {
-      try {
-        const p = parse(trimmed, fmt, new Date());
-        if (!Number.isNaN(p.getTime())) return p;
-      } catch {
-        // continue
-      }
+      const p = parse(trimmed, fmt, new Date());
+      if (!Number.isNaN(p.getTime())) return p;
     }
-  } catch {
-    // fall through
-  }
-
-  const fallback = new Date(trimmed);
-  return Number.isNaN(fallback.getTime()) ? null : fallback;
+  } catch { /* ignore */ }
+  return null;
 }
 
 function normalizeKey(v: any): string {
@@ -105,7 +94,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
 
     const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
     if (!fs.existsSync(filePath)) {
-      return NextResponse.json({ 
+      return NextResponse.json({
         error: 'Stored file missing on disk',
         storagePath: session.storedFile.storagePath,
         resolvedPath: filePath,
@@ -113,153 +102,161 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
       }, { status: 500 });
     }
 
-  const startDate = body.startDate ? new Date(body.startDate) : null;
-  const endDateRaw = body.endDate ? new Date(body.endDate) : null;
-  const endDate = endDateRaw ? new Date(endDateRaw) : null;
-  if (endDate) endDate.setHours(23, 59, 59, 999);
+    const startDate = body.startDate ? new Date(body.startDate) : null;
+    const endDateRaw = body.endDate ? new Date(body.endDate) : null;
+    const endDate = endDateRaw ? new Date(endDateRaw) : null;
+    if (endDate) endDate.setHours(23, 59, 59, 999);
 
-  const paymentModeSet = body.paymentModes?.length ? new Set(body.paymentModes.map((s) => normalizeUpper(s))) : null;
-  const merchantIdSet = body.merchantIds?.length ? new Set(body.merchantIds.map((s) => normalizeKey(s))) : null;
-  const pgSet = body.pgs?.length ? new Set(body.pgs.map((s) => normalizeKey(s))) : null;
-  const bankSet = body.banks?.length ? new Set(body.banks.map((s) => normalizeKey(s))) : null;
-  const cardTypeSet = body.cardTypes?.length ? new Set(body.cardTypes.map((s) => normalizeKey(s))) : null;
+    const paymentModeSet = body.paymentModes?.length ? new Set(body.paymentModes.map((s) => normalizeUpper(s))) : null;
+    const merchantIdSet = body.merchantIds?.length ? new Set(body.merchantIds.map((s) => normalizeKey(s))) : null;
+    const pgSet = body.pgs?.length ? new Set(body.pgs.map((s) => normalizeKey(s))) : null;
+    const bankSet = body.banks?.length ? new Set(body.banks.map((s) => normalizeKey(s))) : null;
+    const cardTypeSet = body.cardTypes?.length ? new Set(body.cardTypes.map((s) => normalizeKey(s))) : null;
 
-  // Pass 1: find min/max time across FAILED txs (after filters).
-  let minMs: number | null = null;
-  let maxMs: number | null = null;
+    // Pass 1: find min/max time across FAILED txs (after filters).
+    let minMs: number | null = null;
+    let maxMs: number | null = null;
 
-  await new Promise<void>((resolve, reject) => {
-    const stream = fs
-      .createReadStream(filePath)
-      .pipe(
-        csvParser({
-          mapHeaders: ({ header }) => String(header || '').trim().toLowerCase(),
-          skipLines: 0,
-        })
-      );
+    await new Promise<void>((resolve, reject) => {
+      const stream = fs
+        .createReadStream(filePath, { highWaterMark: 1024 * 1024 })
+        .pipe(
+          fastcsv.parse({ headers: true, trim: true, ignoreEmpty: true })
+            .transform((row: any) => {
+              const lowercased: any = {};
+              for (const k of Object.keys(row)) {
+                lowercased[k.toLowerCase().trim()] = row[k];
+              }
+              return lowercased;
+            })
+        );
 
-    stream.on('data', (row: any) => {
-      const pm = normalizeUpper(row?.paymentmode);
-      const mid = normalizeKey(row?.merchantid);
-      const pg = normalizeKey(row?.pg);
-      const bankname = normalizeKey(row?.bankname);
-      const cardtype = normalizeKey(row?.cardtype);
-      const txstatus = normalizeUpper(row?.txstatus);
-      const txtime = parseDate(row?.txtime);
-      if (!txtime) return;
+      stream.on('data', (row: any) => {
+        const pm = normalizeUpper(row?.paymentmode);
+        const mid = normalizeKey(row?.merchantid);
+        const pg = normalizeKey(row?.pg);
+        const bankname = normalizeKey(row?.bankname);
+        const cardtype = normalizeKey(row?.cardtype);
+        const txstatus = normalizeUpper(row?.txstatus);
+        const txtime = parseDate(row?.txtime);
+        if (!txtime) return;
 
-      if (startDate && txtime < startDate) return;
-      if (endDate && txtime > endDate) return;
-      if (paymentModeSet && !paymentModeSet.has(pm)) return;
-      if (merchantIdSet && !merchantIdSet.has(mid)) return;
-      if (pgSet && !pgSet.has(pg)) return;
-      if (bankSet) {
-        const flow = classifyUPIFlow(bankname);
-        if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
-      }
-      if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
+        if (startDate && txtime < startDate) return;
+        if (endDate && txtime > endDate) return;
+        if (paymentModeSet && !paymentModeSet.has(pm)) return;
+        if (merchantIdSet && !merchantIdSet.has(mid)) return;
+        if (pgSet && !pgSet.has(pg)) return;
+        if (bankSet) {
+          const flow = classifyUPIFlow(bankname);
+          if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
+        }
+        if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
 
-      if (txstatus !== 'FAILED') return;
+        if (txstatus !== 'FAILED') return;
 
-      const ms = txtime.getTime();
-      if (minMs === null || ms < minMs) minMs = ms;
-      if (maxMs === null || ms > maxMs) maxMs = ms;
+        const ms = txtime.getTime();
+        if (minMs === null || ms < minMs) minMs = ms;
+        if (maxMs === null || ms > maxMs) maxMs = ms;
+      });
+
+      stream.on('error', (err) => reject(err));
+      stream.on('end', () => resolve());
+      stream.on('close', () => resolve());
     });
 
-    stream.on('error', (err) => reject(err));
-    stream.on('end', () => resolve());
-    stream.on('close', () => resolve());
-  });
+    if (minMs === null || maxMs === null) {
+      return NextResponse.json({ insights: [], totalFailures: 0 }, { status: 200 });
+    }
 
-  if (minMs === null || maxMs === null) {
-    return NextResponse.json({ insights: [], totalFailures: 0 }, { status: 200 });
-  }
+    const windows = computeInsightWindowsFromFailedRange(minMs, maxMs);
 
-  const windows = computeInsightWindowsFromFailedRange(minMs, maxMs);
+    // Pass 2: aggregate by (paymentMode, cf_errordescription) with daily series.
+    const groups = new Map<string, GroupAgg>();
+    let totalFailures = 0;
 
-  // Pass 2: aggregate by (paymentMode, cf_errordescription) with daily series.
-  const groups = new Map<string, GroupAgg>();
-  let totalFailures = 0;
+    await new Promise<void>((resolve, reject) => {
+      const stream = fs
+        .createReadStream(filePath, { highWaterMark: 1024 * 1024 })
+        .pipe(
+          fastcsv.parse({ headers: true, trim: true, ignoreEmpty: true })
+            .transform((row: any) => {
+              const lowercased: any = {};
+              for (const k of Object.keys(row)) {
+                lowercased[k.toLowerCase().trim()] = row[k];
+              }
+              return lowercased;
+            })
+        );
 
-  await new Promise<void>((resolve, reject) => {
-    const stream = fs
-      .createReadStream(filePath)
-      .pipe(
-        csvParser({
-          mapHeaders: ({ header }) => String(header || '').trim().toLowerCase(),
-          skipLines: 0,
-        })
-      );
+      stream.on('data', (row: any) => {
+        const pm = normalizeUpper(row?.paymentmode) || 'UNKNOWN';
+        const mid = normalizeKey(row?.merchantid);
+        const pg = normalizeKey(row?.pg);
+        const bankname = normalizeKey(row?.bankname);
+        const cardtype = normalizeKey(row?.cardtype);
+        const txstatus = normalizeUpper(row?.txstatus);
+        const txtime = parseDate(row?.txtime);
+        if (!txtime) return;
 
-    stream.on('data', (row: any) => {
-      const pm = normalizeUpper(row?.paymentmode) || 'UNKNOWN';
-      const mid = normalizeKey(row?.merchantid);
-      const pg = normalizeKey(row?.pg);
-      const bankname = normalizeKey(row?.bankname);
-      const cardtype = normalizeKey(row?.cardtype);
-      const txstatus = normalizeUpper(row?.txstatus);
-      const txtime = parseDate(row?.txtime);
-      if (!txtime) return;
+        if (startDate && txtime < startDate) return;
+        if (endDate && txtime > endDate) return;
+        if (paymentModeSet && !paymentModeSet.has(pm)) return;
+        if (merchantIdSet && !merchantIdSet.has(mid)) return;
+        if (pgSet && !pgSet.has(pg)) return;
+        if (bankSet) {
+          const flow = classifyUPIFlow(bankname);
+          if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
+        }
+        if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
 
-      if (startDate && txtime < startDate) return;
-      if (endDate && txtime > endDate) return;
-      if (paymentModeSet && !paymentModeSet.has(pm)) return;
-      if (merchantIdSet && !merchantIdSet.has(mid)) return;
-      if (pgSet && !pgSet.has(pg)) return;
-      if (bankSet) {
-        const flow = classifyUPIFlow(bankname);
-        if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
-      }
-      if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
+        if (txstatus !== 'FAILED') return;
 
-      if (txstatus !== 'FAILED') return;
+        totalFailures += 1;
 
-      totalFailures += 1;
+        const cfDesc = normalizeKey(row?.cf_errordescription) || normalizeKey(row?.txmsg) || 'Unknown Error';
+        const key = groupKey(pm, cfDesc);
+        let g = groups.get(key);
+        if (!g) {
+          g = { paymentMode: pm, cfErrorDescription: cfDesc, totalVolume: 0, currentVolume: 0, previousVolume: 0, dailyCounts: new Map() };
+          groups.set(key, g);
+        }
 
-      const cfDesc = normalizeKey(row?.cf_errordescription) || normalizeKey(row?.txmsg) || 'Unknown Error';
-      const key = groupKey(pm, cfDesc);
-      let g = groups.get(key);
-      if (!g) {
-        g = { paymentMode: pm, cfErrorDescription: cfDesc, totalVolume: 0, currentVolume: 0, previousVolume: 0, dailyCounts: new Map() };
-        groups.set(key, g);
-      }
+        g.totalVolume += 1;
 
-      g.totalVolume += 1;
+        const t = txtime.getTime();
+        if (t >= windows.current.startDate.getTime() && t <= windows.current.endDate.getTime()) g.currentVolume += 1;
+        if (t >= windows.previous.startDate.getTime() && t <= windows.previous.endDate.getTime()) g.previousVolume += 1;
 
-      const t = txtime.getTime();
-      if (t >= windows.current.startDate.getTime() && t <= windows.current.endDate.getTime()) g.currentVolume += 1;
-      if (t >= windows.previous.startDate.getTime() && t <= windows.previous.endDate.getTime()) g.previousVolume += 1;
+        const dkey = dateKeyForTime(txtime);
+        g.dailyCounts.set(dkey, (g.dailyCounts.get(dkey) || 0) + 1);
+      });
 
-      const dkey = dateKeyForTime(txtime);
-      g.dailyCounts.set(dkey, (g.dailyCounts.get(dkey) || 0) + 1);
+      stream.on('error', (err) => reject(err));
+      stream.on('end', () => resolve());
+      stream.on('close', () => resolve());
     });
-
-    stream.on('error', (err) => reject(err));
-    stream.on('end', () => resolve());
-    stream.on('close', () => resolve());
-  });
 
     const insights = computeFailureInsightsFromAggregates(Array.from(groups.values()), totalFailures, windows);
     return NextResponse.json(
       {
         totalFailures,
         windows: {
-        current: {
-          start: windows.current.startDate.toISOString(),
-          end: windows.current.endDate.toISOString(),
-          label: windows.current.label,
+          current: {
+            start: windows.current.startDate.toISOString(),
+            end: windows.current.endDate.toISOString(),
+            label: windows.current.label,
+          },
+          previous: {
+            start: windows.previous.startDate.toISOString(),
+            end: windows.previous.endDate.toISOString(),
+            label: windows.previous.label,
+          },
+          windowType: windows.windowType,
         },
-        previous: {
-          start: windows.previous.startDate.toISOString(),
-          end: windows.previous.endDate.toISOString(),
-          label: windows.previous.label,
-        },
-        windowType: windows.windowType,
+        insights,
       },
-      insights,
-    },
-    { status: 200 }
-  );
+      { status: 200 }
+    );
   } catch (e: any) {
     const msg = String(e?.message || 'Unknown error');
     return NextResponse.json(

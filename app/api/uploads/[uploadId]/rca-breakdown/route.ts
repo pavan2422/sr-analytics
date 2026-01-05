@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
-import csvParser from 'csv-parser';
+import * as fastcsv from 'fast-csv';
 import { parse } from 'date-fns';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
 import { ensureDatabaseReady } from '@/lib/server/db-ready';
@@ -46,25 +46,19 @@ function parseDate(value: any): Date | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
+
+  // Optimized: Priority to native Date for speed
+  const d = new Date(trimmed);
+  if (!Number.isNaN(d.getTime())) return d;
+
   try {
-    const parsedA = parse(trimmed, 'MMMM d, yyyy, h:mm a', new Date());
-    if (!Number.isNaN(parsedA.getTime())) return parsedA;
-    const isoParsed = new Date(trimmed);
-    if (!Number.isNaN(isoParsed.getTime())) return isoParsed;
-    const formats = ['MMM d, yyyy, h:mm a', 'MM/dd/yyyy h:mm a', 'dd/MM/yyyy h:mm a', 'yyyy-MM-dd HH:mm:ss', 'yyyy-MM-dd'];
+    const formats = ['MMMM d, yyyy, h:mm a', 'MMM d, yyyy, h:mm a', 'MM/dd/yyyy h:mm a', 'dd/MM/yyyy h:mm a', 'yyyy-MM-dd HH:mm:ss'];
     for (const fmt of formats) {
-      try {
-        const p = parse(trimmed, fmt, new Date());
-        if (!Number.isNaN(p.getTime())) return p;
-      } catch {
-        // continue
-      }
+      const p = parse(trimmed, fmt, new Date());
+      if (!Number.isNaN(p.getTime())) return p;
     }
-  } catch {
-    // fall through
-  }
-  const fallback = new Date(trimmed);
-  return Number.isNaN(fallback.getTime()) ? null : fallback;
+  } catch { /* ignore */ }
+  return null;
 }
 
 function norm(v: any): string {
@@ -131,7 +125,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
 
     const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
     if (!fs.existsSync(filePath)) {
-      return NextResponse.json({ 
+      return NextResponse.json({
         error: 'Stored file missing on disk',
         storagePath: session.storedFile.storagePath,
         resolvedPath: filePath,
@@ -139,104 +133,108 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
       }, { status: 500 });
     }
 
-  const globalStart = body.filters.startDate ? new Date(body.filters.startDate) : null;
-  const globalEndRaw = body.filters.endDate ? new Date(body.filters.endDate) : null;
-  const globalEnd = globalEndRaw ? new Date(globalEndRaw) : null;
-  if (globalEnd) globalEnd.setHours(23, 59, 59, 999);
+    const globalStart = body.filters.startDate ? new Date(body.filters.startDate) : null;
+    const globalEndRaw = body.filters.endDate ? new Date(body.filters.endDate) : null;
+    const globalEnd = globalEndRaw ? new Date(globalEndRaw) : null;
+    if (globalEnd) globalEnd.setHours(23, 59, 59, 999);
 
-  const periodStart = new Date(body.period.start);
-  const periodEnd = new Date(body.period.end);
+    const periodStart = new Date(body.period.start);
+    const periodEnd = new Date(body.period.end);
 
-  const paymentModeSet = body.filters.paymentModes?.length ? new Set(body.filters.paymentModes.map((s) => upper(s))) : null;
-  const merchantIdSet = body.filters.merchantIds?.length ? new Set(body.filters.merchantIds.map((s) => norm(s))) : null;
-  const pgSet = body.filters.pgs?.length ? new Set(body.filters.pgs.map((s) => norm(s))) : null;
-  const bankSet = body.filters.banks?.length ? new Set(body.filters.banks.map((s) => norm(s))) : null;
-  const cardTypeSet = body.filters.cardTypes?.length ? new Set(body.filters.cardTypes.map((s) => norm(s))) : null;
+    const paymentModeSet = body.filters.paymentModes?.length ? new Set(body.filters.paymentModes.map((s) => upper(s))) : null;
+    const merchantIdSet = body.filters.merchantIds?.length ? new Set(body.filters.merchantIds.map((s) => norm(s))) : null;
+    const pgSet = body.filters.pgs?.length ? new Set(body.filters.pgs.map((s) => norm(s))) : null;
+    const bankSet = body.filters.banks?.length ? new Set(body.filters.banks.map((s) => norm(s))) : null;
+    const cardTypeSet = body.filters.cardTypes?.length ? new Set(body.filters.cardTypes.map((s) => norm(s))) : null;
 
-  const paymentModeMap = new Map<string, number>();
-  const pgMap = new Map<string, number>();
+    const paymentModeMap = new Map<string, number>();
+    const pgMap = new Map<string, number>();
 
-  await new Promise<void>((resolve, reject) => {
-    const stream = fs
-      .createReadStream(filePath)
-      .pipe(
-        csvParser({
-          mapHeaders: ({ header }) => String(header || '').trim().toLowerCase(),
-          skipLines: 0,
-        })
-      );
+    await new Promise<void>((resolve, reject) => {
+      const stream = fs
+        .createReadStream(filePath, { highWaterMark: 1024 * 1024 })
+        .pipe(
+          fastcsv.parse({ headers: true, trim: true, ignoreEmpty: true })
+            .transform((row: any) => {
+              const lowercased: any = {};
+              for (const k of Object.keys(row)) {
+                lowercased[k.toLowerCase().trim()] = row[k];
+              }
+              return lowercased;
+            })
+        );
 
-    stream.on('data', (row: any) => {
-      const pm = upper(row?.paymentmode);
-      const mid = norm(row?.merchantid);
-      const pg = norm(row?.pg);
-      const bankname = norm(row?.bankname);
-      const cardtype = norm(row?.cardtype);
-      const txstatus = upper(row?.txstatus);
-      const txtime = parseDate(row?.txtime);
-      if (!txtime) return;
+      stream.on('data', (row: any) => {
+        const pm = upper(row?.paymentmode);
+        const mid = norm(row?.merchantid);
+        const pg = norm(row?.pg);
+        const bankname = norm(row?.bankname);
+        const cardtype = norm(row?.cardtype);
+        const txstatus = upper(row?.txstatus);
+        const txtime = parseDate(row?.txtime);
+        if (!txtime) return;
 
-      if (globalStart && txtime < globalStart) return;
-      if (globalEnd && txtime > globalEnd) return;
-      if (paymentModeSet && !paymentModeSet.has(pm)) return;
-      if (merchantIdSet && !merchantIdSet.has(mid)) return;
-      if (pgSet && !pgSet.has(pg)) return;
-      if (bankSet) {
-        const flow = classifyUPIFlow(bankname);
-        if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
-      }
-      if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
+        if (globalStart && txtime < globalStart) return;
+        if (globalEnd && txtime > globalEnd) return;
+        if (paymentModeSet && !paymentModeSet.has(pm)) return;
+        if (merchantIdSet && !merchantIdSet.has(mid)) return;
+        if (pgSet && !pgSet.has(pg)) return;
+        if (bankSet) {
+          const flow = classifyUPIFlow(bankname);
+          if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
+        }
+        if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
 
-      if (txtime < periodStart || txtime > periodEnd) return;
+        if (txtime < periodStart || txtime > periodEnd) return;
 
-      const tx: Transaction = {
-        txstatus,
-        paymentmode: pm,
-        pg,
-        bankname,
-        cardnumber: norm(row?.cardnumber),
-        cardmasked: norm(row?.cardmasked),
-        cardtype,
-        cardcountry: norm(row?.cardcountry),
-        processingcardtype: norm(row?.processingcardtype),
-        nativeotpurleligible: norm(row?.nativeotpurleligible),
-        card_isfrictionless: norm(row?.card_isfrictionless),
-        card_nativeotpaction: norm(row?.card_nativeotpaction),
-        card_par: norm(row?.card_par),
-        iscvvpresent: norm(row?.iscvvpresent),
-        upi_psp: norm(row?.upi_psp),
-        txmsg: norm(row?.txmsg),
-        cf_errorcode: norm(row?.cf_errorcode),
-        cf_errorreason: norm(row?.cf_errorreason),
-        cf_errorsource: norm(row?.cf_errorsource),
-        cf_errordescription: norm(row?.cf_errordescription),
-        pg_errorcode: norm(row?.pg_errorcode),
-        pg_errormessage: norm(row?.pg_errormessage),
-        txtime,
-        txamount: parseNumber(row?.txamount),
-        orderamount: parseNumber(row?.orderamount),
-        capturedamount: parseNumber(row?.capturedamount),
-        transactionDate: '',
-        isSuccess: txstatus === 'SUCCESS',
-        isFailed: txstatus === 'FAILED',
-        isUserDropped: txstatus === 'USER_DROPPED',
-        merchantid: mid,
-      };
+        const tx: Transaction = {
+          txstatus,
+          paymentmode: pm,
+          pg,
+          bankname,
+          cardnumber: norm(row?.cardnumber),
+          cardmasked: norm(row?.cardmasked),
+          cardtype,
+          cardcountry: norm(row?.cardcountry),
+          processingcardtype: norm(row?.processingcardtype),
+          nativeotpurleligible: norm(row?.nativeotpurleligible),
+          card_isfrictionless: norm(row?.card_isfrictionless),
+          card_nativeotpaction: norm(row?.card_nativeotpaction),
+          card_par: norm(row?.card_par),
+          iscvvpresent: norm(row?.iscvvpresent),
+          upi_psp: norm(row?.upi_psp),
+          txmsg: norm(row?.txmsg),
+          cf_errorcode: norm(row?.cf_errorcode),
+          cf_errorreason: norm(row?.cf_errorreason),
+          cf_errorsource: norm(row?.cf_errorsource),
+          cf_errordescription: norm(row?.cf_errordescription),
+          pg_errorcode: norm(row?.pg_errorcode),
+          pg_errormessage: norm(row?.pg_errormessage),
+          txtime,
+          txamount: parseNumber(row?.txamount),
+          orderamount: parseNumber(row?.orderamount),
+          capturedamount: parseNumber(row?.capturedamount),
+          transactionDate: '',
+          isSuccess: txstatus === 'SUCCESS',
+          isFailed: txstatus === 'FAILED',
+          isUserDropped: txstatus === 'USER_DROPPED',
+          merchantid: mid,
+        };
 
-      const statusMatch = body.analysisType === 'FAILED' ? tx.isFailed : tx.isUserDropped;
-      if (!statusMatch) return;
+        const statusMatch = body.analysisType === 'FAILED' ? tx.isFailed : tx.isUserDropped;
+        if (!statusMatch) return;
 
-      const dimValue = getDimensionValue(tx, body.dimension);
-      if (dimValue !== body.dimensionValue) return;
+        const dimValue = getDimensionValue(tx, body.dimension);
+        if (dimValue !== body.dimensionValue) return;
 
-      paymentModeMap.set(pm || 'Unknown', (paymentModeMap.get(pm || 'Unknown') || 0) + 1);
-      pgMap.set(pg || 'Unknown', (pgMap.get(pg || 'Unknown') || 0) + 1);
+        paymentModeMap.set(pm || 'Unknown', (paymentModeMap.get(pm || 'Unknown') || 0) + 1);
+        pgMap.set(pg || 'Unknown', (pgMap.get(pg || 'Unknown') || 0) + 1);
+      });
+
+      stream.on('error', (err) => reject(err));
+      stream.on('end', () => resolve());
+      stream.on('close', () => resolve());
     });
-
-    stream.on('error', (err) => reject(err));
-    stream.on('end', () => resolve());
-    stream.on('close', () => resolve());
-  });
 
     const total = Array.from(paymentModeMap.values()).reduce((s, n) => s + n, 0);
     const paymentModes = Array.from(paymentModeMap.entries())

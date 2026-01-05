@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
-import csvParser from 'csv-parser';
+import * as fastcsv from 'fast-csv';
 import { parse } from 'date-fns';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
 import { ensureDatabaseReady } from '@/lib/server/db-ready';
@@ -14,38 +14,21 @@ function parseDate(value: any): Date | null {
   if (!value) return null;
   if (value instanceof Date) return value;
   if (typeof value !== 'string') return null;
-
   const trimmed = value.trim();
   if (!trimmed) return null;
 
+  // Optimized: Priority to native Date for speed
+  const d = new Date(trimmed);
+  if (!Number.isNaN(d.getTime())) return d;
+
   try {
-    const parsedA = parse(trimmed, 'MMMM d, yyyy, h:mm a', new Date());
-    if (!Number.isNaN(parsedA.getTime())) return parsedA;
-
-    const isoParsed = new Date(trimmed);
-    if (!Number.isNaN(isoParsed.getTime())) return isoParsed;
-
-    const formats = [
-      'MMM d, yyyy, h:mm a',
-      'MM/dd/yyyy h:mm a',
-      'dd/MM/yyyy h:mm a',
-      'yyyy-MM-dd HH:mm:ss',
-      'yyyy-MM-dd',
-    ];
+    const formats = ['MMMM d, yyyy, h:mm a', 'MMM d, yyyy, h:mm a', 'MM/dd/yyyy h:mm a', 'dd/MM/yyyy h:mm a', 'yyyy-MM-dd HH:mm:ss'];
     for (const fmt of formats) {
-      try {
-        const p = parse(trimmed, fmt, new Date());
-        if (!Number.isNaN(p.getTime())) return p;
-      } catch {
-        // continue
-      }
+      const p = parse(trimmed, fmt, new Date());
+      if (!Number.isNaN(p.getTime())) return p;
     }
-  } catch {
-    // fall through
-  }
-
-  const fallback = new Date(trimmed);
-  return Number.isNaN(fallback.getTime()) ? null : fallback;
+  } catch { /* ignore */ }
+  return null;
 }
 
 function classifyUPIFlow(bankname: string | undefined): string {
@@ -100,7 +83,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
 
     const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
     if (!fs.existsSync(filePath)) {
-      return NextResponse.json({ 
+      return NextResponse.json({
         error: 'Stored file missing on disk',
         storagePath: session.storedFile.storagePath,
         resolvedPath: filePath,
@@ -108,48 +91,52 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
       }, { status: 500 });
     }
 
-  let minMs: number | null = null;
-  let maxMs: number | null = null;
+    let minMs: number | null = null;
+    let maxMs: number | null = null;
 
-  await new Promise<void>((resolve, reject) => {
-    const stream = fs
-      .createReadStream(filePath)
-      .pipe(
-        csvParser({
-          mapHeaders: ({ header }) => String(header || '').trim().toLowerCase(),
-          skipLines: 0,
-        })
-      );
+    await new Promise<void>((resolve, reject) => {
+      const stream = fs
+        .createReadStream(filePath, { highWaterMark: 1024 * 1024 })
+        .pipe(
+          fastcsv.parse({ headers: true, trim: true, ignoreEmpty: true })
+            .transform((row: any) => {
+              const lowercased: any = {};
+              for (const k of Object.keys(row)) {
+                lowercased[k.toLowerCase().trim()] = row[k];
+              }
+              return lowercased;
+            })
+        );
 
-    stream.on('data', (row: any) => {
-      const pm = row?.paymentmode ? String(row.paymentmode).toUpperCase().trim() : '';
-      const mid = row?.merchantid ? String(row.merchantid).trim() : '';
-      const pg = String(row?.pg || '').trim();
-      const bankname = String(row?.bankname || '').trim();
-      const cardtype = String(row?.cardtype || '').trim();
-      const txtime = parseDate(row?.txtime);
-      if (!txtime) return;
-      const ms = txtime.getTime();
+      stream.on('data', (row: any) => {
+        const pm = row?.paymentmode ? String(row.paymentmode).toUpperCase().trim() : '';
+        const mid = row?.merchantid ? String(row.merchantid).trim() : '';
+        const pg = String(row?.pg || '').trim();
+        const bankname = String(row?.bankname || '').trim();
+        const cardtype = String(row?.cardtype || '').trim();
+        const txtime = parseDate(row?.txtime);
+        if (!txtime) return;
+        const ms = txtime.getTime();
 
-      if (startDate && txtime < startDate) return;
-      if (endDate && txtime > endDate) return;
-      if (paymentModeSet && !paymentModeSet.has(pm)) return;
-      if (merchantIdSet && !merchantIdSet.has(mid)) return;
-      if (pgSet && !pgSet.has(pg)) return;
-      if (bankSet) {
-        const flow = classifyUPIFlow(bankname);
-        if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
-      }
-      if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
+        if (startDate && txtime < startDate) return;
+        if (endDate && txtime > endDate) return;
+        if (paymentModeSet && !paymentModeSet.has(pm)) return;
+        if (merchantIdSet && !merchantIdSet.has(mid)) return;
+        if (pgSet && !pgSet.has(pg)) return;
+        if (bankSet) {
+          const flow = classifyUPIFlow(bankname);
+          if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
+        }
+        if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
 
-      if (minMs === null || ms < minMs) minMs = ms;
-      if (maxMs === null || ms > maxMs) maxMs = ms;
+        if (minMs === null || ms < minMs) minMs = ms;
+        if (maxMs === null || ms > maxMs) maxMs = ms;
+      });
+
+      stream.on('error', (err) => reject(err));
+      stream.on('end', () => resolve());
+      stream.on('close', () => resolve());
     });
-
-    stream.on('error', (err) => reject(err));
-    stream.on('end', () => resolve());
-    stream.on('close', () => resolve());
-  });
 
     return NextResponse.json(
       {

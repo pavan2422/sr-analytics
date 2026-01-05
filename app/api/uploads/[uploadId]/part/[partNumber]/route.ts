@@ -28,7 +28,18 @@ export async function PUT(req: Request, ctx: { params: Promise<{ uploadId: strin
   }
 
   const session = await prisma.uploadSession.findUnique({ where: { id: uploadId } });
-  if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
+  if (!session) {
+    const dbUrl = process.env.DATABASE_URL || 'default (sqlite dev.db)';
+    console.error(`[Upload Error] Session ${uploadId} not found in DB. DB_URL=${dbUrl}`);
+    return NextResponse.json({
+      error: 'Upload session not found',
+      debug: {
+        uploadId,
+        message: 'This often happens on serverless (Vercel) if DATABASE_URL is not set to a persistent DB.',
+        dbUrl: process.env.DATABASE_URL ? '[REDACTED]' : 'CACHE_LOCAL_SQLITE'
+      }
+    }, { status: 404 });
+  }
   if (session.status === 'completed') return NextResponse.json({ error: 'Upload already completed' }, { status: 409 });
 
   const sizeBytes = Number(session.sizeBytes);

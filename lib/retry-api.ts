@@ -2,7 +2,7 @@
  * Checks if an upload session is ready (status === 'completed' and has storedFileId).
  * This prevents 404 errors by ensuring the session exists before making API calls.
  */
-async function checkSessionReady(uploadId: string, maxWaitRetries: number = 20): Promise<boolean> {
+async function checkSessionReady(uploadId: string, maxWaitRetries: number = 300): Promise<boolean> {
   for (let attempt = 0; attempt < maxWaitRetries; attempt++) {
     try {
       const res = await fetch(`/api/uploads/${uploadId}`, { method: 'GET' });
@@ -15,8 +15,9 @@ async function checkSessionReady(uploadId: string, maxWaitRetries: number = 20):
     } catch {
       // Continue retrying
     }
-    // Wait before next check (exponential backoff: 200ms, 300ms, 400ms, etc.)
-    await new Promise(resolve => setTimeout(resolve, 200 + (attempt * 100)));
+    // Wait before next check (exponential backoff: 500ms, 1000ms... cap at 2s)
+    const delay = Math.min(500 + (attempt * 500), 2000);
+    await new Promise(resolve => setTimeout(resolve, delay));
   }
   return false;
 }
@@ -32,10 +33,12 @@ export async function retryApiCall<T>(
   maxRetries: number = 5,
   isRetryable: (error: any) => boolean = (e) => {
     const msg = String(e?.message || '');
-    return msg.includes('404') || 
-           msg.includes('not found') || 
-           msg.includes('Upload session not found') ||
-           msg.includes('(404)');
+    return msg.includes('404') ||
+      msg.includes('not found') ||
+      msg.includes('Upload session not found') ||
+      msg.includes('(404)') ||
+      msg.includes('409') ||
+      msg.includes('Upload not completed');
   },
   uploadId?: string // If provided, wait for session to be ready first
 ): Promise<T> {

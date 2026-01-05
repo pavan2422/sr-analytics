@@ -16,7 +16,7 @@ export function ReportsTab() {
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
   const getIndexedDBFilterOptions = useStore((state) => state.getIndexedDBFilterOptions);
-  
+
   const [reportType, setReportType] = useState<ReportType>('daily');
   const [selectedPaymentModes, setSelectedPaymentModes] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -146,7 +146,7 @@ export function ReportsTab() {
       {/* Controls Section */}
       <div className="bg-card border border-border rounded-lg p-6">
         <h2 className="text-xl font-semibold mb-6">SR Analysis Report</h2>
-        
+
         {isLargeFile && !_useBackend && (
           <div className="mb-6 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
             <p className="text-sm text-yellow-800 dark:text-yellow-200">
@@ -159,7 +159,8 @@ export function ReportsTab() {
         {isLargeFile && _useBackend && (
           <div className="mb-6 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
             <p className="text-sm text-yellow-800 dark:text-yellow-200">
-              Large file detected. Reports are generated from the full dataset on the server (no sampling). This may take a few minutes.
+              Large file mode active. <strong>Reports are generated from 100% of your data</strong> on the server (no sampling).
+              This process handles millions of rows and may take a few minutes to complete. Please keep this tab open.
             </p>
           </div>
         )}

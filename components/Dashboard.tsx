@@ -55,10 +55,10 @@ export function Dashboard() {
   const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(['overview']));
   const [restoreStatus, setRestoreStatus] = useState<'idle' | 'restoring' | 'missing' | 'error'>('idle');
   const [showAnalysisOverlay, setShowAnalysisOverlay] = useState(false);
-  
+
   // Avoid flashing uploader during rehydrate: show uploader only after hydration completes.
   // Check both in-memory data and IndexedDB data
-  const hasData = _useIndexedDB ? transactionCount > 0 : rawTransactions.length > 0;
+  const hasData = transactionCount > 0;
   const showUploader = hasHydrated && !isLoading && !hasData && (!fileNames || fileNames.length === 0);
   const showAnalyzingOverlay = hasData && !isLoading && analysisStage !== null && showAnalysisOverlay;
   const showRestoreHint = hasHydrated && !isLoading && !hasData && (fileNames?.length ?? 0) > 0;
@@ -82,7 +82,7 @@ export function Dashboard() {
       })
       .catch(() => setRestoreStatus('error'));
   }, [showRestoreHint, restoreStatus, restoreFromIndexedDB]);
-  
+
   // Payment mode options based on active tab - memoized
   const getPaymentModeOptions = useMemo(() => {
     const options: Record<Tab, string[]> = {
@@ -277,65 +277,65 @@ export function Dashboard() {
                 </div>
               )}
 
-            {/* Global Filters */}
-            <Filters activeTab={activeTab} paymentModeOptions={paymentModeOptions} />
+              {/* Global Filters */}
+              <Filters activeTab={activeTab} paymentModeOptions={paymentModeOptions} />
 
-            {/* Tabs */}
-            <div className="mt-6 border-b border-border">
-              <nav className="flex space-x-8">
-                {tabs.map((tab) => (
-                  <button
-                    key={tab.id}
-                    onClick={() => handleTabChange(tab.id)}
-                    className={cn(
-                      'py-4 px-1 border-b-2 font-medium text-sm transition-colors',
-                      activeTab === tab.id
-                        ? 'border-primary text-primary'
-                        : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
-                    )}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </nav>
-            </div>
-
-            {/* Tab Content */}
-            <div className="mt-6">
-              <div className={activeTab === 'overview' ? 'block' : 'hidden'}>
-                <OverviewTab />
+              {/* Tabs */}
+              <div className="mt-6 border-b border-border">
+                <nav className="flex space-x-8">
+                  {tabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      onClick={() => handleTabChange(tab.id)}
+                      className={cn(
+                        'py-4 px-1 border-b-2 font-medium text-sm transition-colors',
+                        activeTab === tab.id
+                          ? 'border-primary text-primary'
+                          : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
+                      )}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </nav>
               </div>
-              {mountedTabs.has('upi') && (
-                <div className={activeTab === 'upi' ? 'block' : 'hidden'}>
-                  <UPITab />
+
+              {/* Tab Content */}
+              <div className="mt-6">
+                <div className={activeTab === 'overview' ? 'block' : 'hidden'}>
+                  <OverviewTab />
                 </div>
-              )}
-              {mountedTabs.has('cards') && (
-                <div className={activeTab === 'cards' ? 'block' : 'hidden'}>
-                  <CardsTab />
-                </div>
-              )}
-              {mountedTabs.has('netbanking') && (
-                <div className={activeTab === 'netbanking' ? 'block' : 'hidden'}>
-                  <NetbankingTab />
-                </div>
-              )}
-              {mountedTabs.has('rca') && (
-                <div className={activeTab === 'rca' ? 'block' : 'hidden'}>
-                  <RCATab />
-                </div>
-              )}
-              {mountedTabs.has('insights') && (
-                <div className={activeTab === 'insights' ? 'block' : 'hidden'}>
-                  <InsightsTab />
-                </div>
-              )}
-              {mountedTabs.has('reports') && (
-                <div className={activeTab === 'reports' ? 'block' : 'hidden'}>
-                  <ReportsTab />
-                </div>
-              )}
-            </div>
+                {mountedTabs.has('upi') && (
+                  <div className={activeTab === 'upi' ? 'block' : 'hidden'}>
+                    <UPITab />
+                  </div>
+                )}
+                {mountedTabs.has('cards') && (
+                  <div className={activeTab === 'cards' ? 'block' : 'hidden'}>
+                    <CardsTab />
+                  </div>
+                )}
+                {mountedTabs.has('netbanking') && (
+                  <div className={activeTab === 'netbanking' ? 'block' : 'hidden'}>
+                    <NetbankingTab />
+                  </div>
+                )}
+                {mountedTabs.has('rca') && (
+                  <div className={activeTab === 'rca' ? 'block' : 'hidden'}>
+                    <RCATab />
+                  </div>
+                )}
+                {mountedTabs.has('insights') && (
+                  <div className={activeTab === 'insights' ? 'block' : 'hidden'}>
+                    <InsightsTab />
+                  </div>
+                )}
+                {mountedTabs.has('reports') && (
+                  <div className={activeTab === 'reports' ? 'block' : 'hidden'}>
+                    <ReportsTab />
+                  </div>
+                )}
+              </div>
             </div>
           </>
         )}
