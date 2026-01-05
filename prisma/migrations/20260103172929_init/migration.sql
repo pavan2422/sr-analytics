@@ -8,7 +8,7 @@ CREATE TABLE "StoredFile" (
     "sha256Hex" TEXT,
     "storageBackend" TEXT NOT NULL,
     "storagePath" TEXT NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- CreateTable
@@ -19,9 +19,9 @@ CREATE TABLE "StoredFileAnalysis" (
     "totalRows" INTEGER,
     "resultJson" TEXT,
     "error" TEXT,
-    "startedAt" DATETIME,
-    "completedAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "startedAt" TIMESTAMP(3),
+    "completedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "storedFileId" TEXT NOT NULL,
     CONSTRAINT "StoredFileAnalysis_storedFileId_fkey" FOREIGN KEY ("storedFileId") REFERENCES "StoredFile" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
 );
@@ -35,8 +35,8 @@ CREATE TABLE "UploadSession" (
     "sizeBytes" BIGINT NOT NULL,
     "chunkSizeBytes" INTEGER NOT NULL,
     "receivedBytes" BIGINT NOT NULL DEFAULT 0,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "completedAt" DATETIME,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "completedAt" TIMESTAMP(3),
     "storedFileId" TEXT,
     CONSTRAINT "UploadSession_storedFileId_fkey" FOREIGN KEY ("storedFileId") REFERENCES "StoredFile" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
