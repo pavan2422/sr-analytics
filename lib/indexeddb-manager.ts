@@ -324,13 +324,14 @@ class IndexedDBTransactionManager implements DBManager {
         }
 
         const tx = cursor.value as Transaction;
+        const txTime = tx.txtime instanceof Date ? tx.txtime : new Date(tx.txtime as any);
 
         // Apply filters synchronously (must be fast, no async)
         let include = true;
         
         if (filters) {
-          if (filters.startDate && tx.txtime < filters.startDate) include = false;
-          if (filters.endDate && tx.txtime > filters.endDate) include = false;
+          if (filters.startDate && txTime < filters.startDate) include = false;
+          if (filters.endDate && txTime > filters.endDate) include = false;
           if (filters.paymentModes && filters.paymentModes.length > 0) {
             if (!filters.paymentModes.includes(tx.paymentmode)) include = false;
           }
