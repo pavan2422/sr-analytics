@@ -58,7 +58,7 @@ export function OverviewTab() {
               throw new Error(`Failed to load breakdowns (${r.status}): ${msg}`);
             }
             return r;
-          });
+          }, 5, undefined, backendUploadId);
           const json = (await res.json()) as OverviewBreakdowns;
           if (!cancelled) {
             setSample([]); // not used in backend mode

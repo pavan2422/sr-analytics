@@ -91,7 +91,7 @@ async function fetchBackendSample(uploadId: string, maxRows: number) {
     }
     const json = (await res.json()) as { transactions: Transaction[]; storedFileId: string };
     return json;
-  });
+  }, 5, undefined, uploadId); // Pass uploadId to wait for session readiness
 }
 
 function buildBackendFilterQuery(filters: {
@@ -129,7 +129,7 @@ async function fetchBackendSampleFiltered(
     }
     const json = (await res.json()) as { transactions: Transaction[]; storedFileId: string };
     return json;
-  });
+  }, 5, undefined, uploadId); // Pass uploadId to wait for session readiness
 }
 
 async function fetchBackendMetrics(uploadId: string, filters: Parameters<typeof buildBackendFilterQuery>[0]) {
@@ -156,7 +156,7 @@ async function fetchBackendMetrics(uploadId: string, filters: Parameters<typeof 
       globalMetrics: Metrics;
       dailyTrends: DailyTrend[];
     };
-  });
+  }, 5, undefined, uploadId); // Pass uploadId to wait for session readiness
 }
 
 async function fetchBackendFilterOptions(uploadId: string) {
@@ -167,7 +167,7 @@ async function fetchBackendFilterOptions(uploadId: string) {
       throw new Error(`Failed to load filter options from backend (${res.status}): ${msg}`);
     }
     return (await res.json()) as { paymentModes: string[]; merchantIds: string[]; truncated?: boolean };
-  });
+  }, 5, undefined, uploadId); // Pass uploadId to wait for session readiness
 }
 
 async function fetchBackendTimeBounds(uploadId: string, filters: Parameters<typeof buildBackendFilterQuery>[0]) {
@@ -183,7 +183,7 @@ async function fetchBackendTimeBounds(uploadId: string, filters: Parameters<type
       min: json.min ? new Date(json.min) : undefined,
       max: json.max ? new Date(json.max) : undefined,
     };
-  });
+  }, 5, undefined, uploadId); // Pass uploadId to wait for session readiness
 }
 
 // Stream a HUGE CSV but stop after a fixed number of rows (sample mode).

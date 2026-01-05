@@ -71,7 +71,7 @@ export function RCATab() {
               throw new Error(`Failed to compute backend RCA (${r.status}): ${msg}`);
             }
             return r;
-          });
+          }, 5, undefined, backendUploadId);
           const json = (await res.json()) as any;
           setComparison({
             comparison: json.comparison,

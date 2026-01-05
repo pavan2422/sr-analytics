@@ -61,7 +61,7 @@ export function UPITab() {
           }
           const json = (await res.json()) as ReturnType<typeof computeUPIMetrics>;
           if (!cancelled) setBackendMetrics(json);
-        });
+        }, 5, undefined, backendUploadId);
       })()
         .catch(() => {
           if (!cancelled) setBackendMetrics(null);

@@ -51,7 +51,7 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
               cardTypes: (json.cardTypes || []).filter(Boolean).sort(),
             });
           }
-        });
+        }, 5, undefined, backendUploadId);
       })().catch(() => {
         if (!cancelled) setBackendOptions(null);
       });

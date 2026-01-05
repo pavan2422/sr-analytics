@@ -62,7 +62,7 @@ export function InsightsTab() {
                 throw new Error(`Failed to compute backend insights (${r.status}): ${msg}`);
               }
               return r;
-            });
+            }, 5, undefined, backendUploadId);
             const json = (await res.json()) as { insights: FailureInsight[] };
             setInsights(json.insights || []);
             setCurrentPage(1);

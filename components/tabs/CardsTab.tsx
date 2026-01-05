@@ -61,7 +61,7 @@ export function CardsTab() {
           }
           const json = (await res.json()) as ReturnType<typeof computeCardMetrics>;
           if (!cancelled) setBackendMetrics(json);
-        });
+        }, 5, undefined, backendUploadId);
       })()
         .catch(() => {
           if (!cancelled) setBackendMetrics(null);

@@ -61,7 +61,7 @@ export function NetbankingTab() {
           }
           const json = (await res.json()) as ReturnType<typeof computeNetbankingMetrics>;
           if (!cancelled) setBackendMetrics(json);
-        });
+        }, 5, undefined, backendUploadId);
       })()
         .catch(() => {
           if (!cancelled) setBackendMetrics(null);
