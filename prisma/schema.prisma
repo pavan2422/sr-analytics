@@ -5,6 +5,10 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  // Optional but recommended with Neon/Vercel:
+  // - DATABASE_URL can be the pooled (pooler) URL for serverless runtime
+  // - DIRECT_URL should be the direct (non-pooler) URL for migrations
+  directUrl = env("DIRECT_URL")
 }
 
 model StoredFile {
