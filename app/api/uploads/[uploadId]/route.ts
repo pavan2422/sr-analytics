@@ -21,10 +21,26 @@ export async function GET(_req: Request, ctx: { params: Promise<{ uploadId: stri
     );
   }
 
-  const session = await prisma.uploadSession.findUnique({
-    where: { id: uploadId },
-    include: { storedFile: true },
-  });
+  // Retry logic to handle race conditions on serverless platforms where
+  // session creation might not be immediately visible
+  let session = null;
+  const maxRetries = 5;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    session = await prisma.uploadSession.findUnique({
+      where: { id: uploadId },
+      include: { storedFile: true },
+    });
+
+    if (session) {
+      break; // Session found, exit retry loop
+    }
+
+    // If not found and we have retries left, wait a bit before retrying
+    if (attempt < maxRetries - 1) {
+      // Exponential backoff: 100ms, 200ms, 400ms, 800ms
+      await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, attempt)));
+    }
+  }
 
   if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
 
