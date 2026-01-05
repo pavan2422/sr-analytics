@@ -19,6 +19,7 @@ export function RCATab() {
   const _useIndexedDB = useStore((state) => state._useIndexedDB);
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const filteredTransactions = useStore((state) => state.filteredTransactions);
+  const dailyTrends = useStore((state) => state.dailyTrends);
   const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
   const getFilteredTimeBounds = useStore((state) => state.getFilteredTimeBounds);
   const [periodDays, setPeriodDays] = useState(7);
@@ -44,7 +45,11 @@ export function RCATab() {
         if (_useIndexedDB) {
           // Efficiently find bounds using the txtime index, then sample per-period.
           const bounds = await getFilteredTimeBounds();
-          const currentPeriodEnd = bounds.max || new Date();
+          // Prefer real dataset max time; do NOT default to "now" (can fall outside dataset and yield empty samples).
+          const trendMax = dailyTrends.length
+            ? new Date(`${dailyTrends[dailyTrends.length - 1]!.date}T23:59:59.999`)
+            : null;
+          const currentPeriodEnd = (bounds.max || trendMax || bounds.min || new Date()) as Date;
           const currentPeriodStart = subDays(currentPeriodEnd, periodDays);
           const previousPeriodEnd = subDays(currentPeriodStart, 1);
           const previousPeriodStart = subDays(previousPeriodEnd, periodDays);
@@ -105,6 +110,7 @@ export function RCATab() {
     periodDays,
     selectedPaymentMode,
     filteredTransactions,
+    dailyTrends,
     getSampleFilteredTransactions,
     getFilteredTimeBounds,
   ]);
@@ -202,9 +208,10 @@ export function RCATab() {
         {/* Period Info */}
         <div className="text-sm text-muted-foreground">
           {comparison && comparison.comparison && (() => {
-            // Use comparison data instead of iterating transactions
-            const maxDate = new Date();
-            const currentPeriodEnd = maxDate;
+            // Prefer dataset max date over "now"
+            const currentPeriodEnd = dailyTrends.length
+              ? new Date(`${dailyTrends[dailyTrends.length - 1]!.date}T23:59:59.999`)
+              : new Date();
             const currentPeriodStart = subDays(currentPeriodEnd, periodDays);
             const previousPeriodEnd = subDays(currentPeriodStart, 1);
             const previousPeriodStart = subDays(previousPeriodEnd, periodDays);
