@@ -45,14 +45,24 @@ export function RCATab() {
         if (_useIndexedDB) {
           // Efficiently find bounds using the txtime index, then sample per-period.
           const bounds = await getFilteredTimeBounds();
-          // Prefer real dataset max time; do NOT default to "now" (can fall outside dataset and yield empty samples).
-          const trendMax = dailyTrends.length
-            ? new Date(`${dailyTrends[dailyTrends.length - 1]!.date}T23:59:59.999`)
-            : null;
-          const currentPeriodEnd = (bounds.max || trendMax || bounds.min || new Date()) as Date;
-          const currentPeriodStart = subDays(currentPeriodEnd, periodDays);
+          // Always anchor to dataset min/max. Never default to "now" because it can be outside dataset.
+          const fallbackMin = dailyTrends.length ? new Date(`${dailyTrends[0]!.date}T00:00:00.000`) : null;
+          const fallbackMax = dailyTrends.length ? new Date(`${dailyTrends[dailyTrends.length - 1]!.date}T23:59:59.999`) : null;
+          const dataMin = bounds.min || fallbackMin;
+          const dataMax = bounds.max || fallbackMax;
+          if (!dataMin || !dataMax) {
+            // If we cannot determine any bounds, bail gracefully.
+            setComparison(null);
+            setIsComputing(false);
+            return;
+          }
+
+          const currentPeriodEnd = dataMax;
+          const unclampedCurrentStart = subDays(currentPeriodEnd, periodDays);
+          const currentPeriodStart = unclampedCurrentStart < dataMin ? dataMin : unclampedCurrentStart;
           const previousPeriodEnd = subDays(currentPeriodStart, 1);
-          const previousPeriodStart = subDays(previousPeriodEnd, periodDays);
+          const unclampedPrevStart = subDays(previousPeriodEnd, periodDays);
+          const previousPeriodStart = unclampedPrevStart < dataMin ? dataMin : unclampedPrevStart;
 
           // Sample current + previous from IndexedDB (bounded, memory-safe).
           currentFiltered = await getSampleFilteredTransactions(25000, {
@@ -208,13 +218,15 @@ export function RCATab() {
         {/* Period Info */}
         <div className="text-sm text-muted-foreground">
           {comparison && comparison.comparison && (() => {
-            // Prefer dataset max date over "now"
-            const currentPeriodEnd = dailyTrends.length
-              ? new Date(`${dailyTrends[dailyTrends.length - 1]!.date}T23:59:59.999`)
-              : new Date();
-            const currentPeriodStart = subDays(currentPeriodEnd, periodDays);
+            // Display periods anchored to dataset range (min/max via dailyTrends in UI).
+            const dataMin = dailyTrends.length ? new Date(`${dailyTrends[0]!.date}T00:00:00.000`) : null;
+            const dataMax = dailyTrends.length ? new Date(`${dailyTrends[dailyTrends.length - 1]!.date}T23:59:59.999`) : null;
+            const currentPeriodEnd = dataMax || new Date();
+            const unclampedCurrentStart = subDays(currentPeriodEnd, periodDays);
+            const currentPeriodStart = dataMin && unclampedCurrentStart < dataMin ? dataMin : unclampedCurrentStart;
             const previousPeriodEnd = subDays(currentPeriodStart, 1);
-            const previousPeriodStart = subDays(previousPeriodEnd, periodDays);
+            const unclampedPrevStart = subDays(previousPeriodEnd, periodDays);
+            const previousPeriodStart = dataMin && unclampedPrevStart < dataMin ? dataMin : unclampedPrevStart;
             
             return (
               <>
