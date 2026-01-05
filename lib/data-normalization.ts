@@ -1,5 +1,7 @@
 import { Transaction } from '@/types';
-import { format, parse } from 'date-fns';
+import { format } from 'date-fns';
+import { normalizeHeaderKey } from '@/lib/csv-headers';
+import { parseTxTime } from '@/lib/tx-time';
 
 // Helper function to parse numbers with commas
 function parseNumber(value: any): number {
@@ -12,51 +14,6 @@ function parseNumber(value: any): number {
     return isNaN(parsed) ? 0 : parsed;
   }
   return 0;
-}
-
-// Helper function to parse various date formats
-function parseDate(value: any): Date {
-  if (!value) return new Date();
-  if (value instanceof Date) return value;
-  if (typeof value !== 'string') return new Date();
-  
-  const trimmed = value.trim();
-  if (!trimmed) return new Date();
-  
-  // Try parsing common date formats
-  try {
-    // Try format like "October 3, 2025, 1:43 PM"
-    const parsed = parse(trimmed, 'MMMM d, yyyy, h:mm a', new Date());
-    if (!isNaN(parsed.getTime())) return parsed;
-    
-    // Try ISO format
-    const isoParsed = new Date(trimmed);
-    if (!isNaN(isoParsed.getTime())) return isoParsed;
-    
-    // Try other common formats
-    const formats = [
-      'MMM d, yyyy, h:mm a',
-      'MM/dd/yyyy h:mm a',
-      'dd/MM/yyyy h:mm a',
-      'yyyy-MM-dd HH:mm:ss',
-      'yyyy-MM-dd',
-    ];
-    
-    for (const fmt of formats) {
-      try {
-        const parsed = parse(trimmed, fmt, new Date());
-        if (!isNaN(parsed.getTime())) return parsed;
-      } catch (e) {
-        // Continue to next format
-      }
-    }
-  } catch (e) {
-    // Fall through to default
-  }
-  
-  // Fallback: try standard Date constructor
-  const fallback = new Date(trimmed);
-  return isNaN(fallback.getTime()) ? new Date() : fallback;
 }
 
 export function normalizeData(rawData: any[]): Transaction[] {
@@ -77,7 +34,8 @@ export function normalizeData(rawData: any[]): Transaction[] {
     
     // Normalize all keys to lowercase
     Object.keys(row).forEach((key) => {
-      const lowerKey = key.toLowerCase().trim();
+      const lowerKey = normalizeHeaderKey(key);
+      if (!lowerKey) return;
       let value = row[key];
       
       // Trim whitespace from string fields
@@ -96,8 +54,10 @@ export function normalizeData(rawData: any[]): Transaction[] {
       normalized.paymentmode = String(normalized.paymentmode).toUpperCase().trim();
     }
     
-    // Convert timestamps
-    normalized.txtime = parseDate(normalized.txtime);
+    // Convert timestamps (never "fallback to now" — drop rows we cannot date)
+    const txtime = parseTxTime(normalized.txtime);
+    if (!txtime) return null;
+    normalized.txtime = txtime;
     
     // Convert numeric fields (handle commas)
     normalized.txamount = parseNumber(normalized.txamount);
@@ -105,7 +65,7 @@ export function normalizeData(rawData: any[]): Transaction[] {
     normalized.capturedamount = parseNumber(normalized.capturedamount);
     
     // Create derived fields
-    normalized.transactionDate = format(normalized.txtime, 'yyyy-MM-dd');
+    normalized.transactionDate = format(txtime, 'yyyy-MM-dd');
     normalized.isSuccess = normalized.txstatus === 'SUCCESS';
     normalized.isFailed = normalized.txstatus === 'FAILED';
     normalized.isUserDropped = normalized.txstatus === 'USER_DROPPED';

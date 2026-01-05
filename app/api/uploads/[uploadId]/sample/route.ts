@@ -1,59 +1,16 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
-import * as fastcsv from 'fast-csv';
-import { parse } from 'date-fns';
-import { normalizeData } from '@/lib/data-normalization';
+import csvParser from 'csv-parser';
+import { normalizeData, classifyUPIFlow } from '@/lib/data-normalization';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
 import { ensureDatabaseReady } from '@/lib/server/db-ready';
+import { normalizeHeaderKey } from '@/lib/csv-headers';
+import { parseTxTime } from '@/lib/tx-time';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 // Allow up to 5 minutes for large file processing (Vercel Pro plan max)
 export const maxDuration = 300;
-
-function parseDate(value: any): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return value;
-  if (typeof value !== 'string') return null;
-
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  // OPTIMIZATION: Try native Date first
-  const isoParsed = new Date(trimmed);
-  if (!Number.isNaN(isoParsed.getTime())) return isoParsed;
-
-  try {
-    const parsedA = parse(trimmed, 'MMMM d, yyyy, h:mm a', new Date());
-    if (!Number.isNaN(parsedA.getTime())) return parsedA;
-
-    const formats = [
-      'MMM d, yyyy, h:mm a',
-      'MM/dd/yyyy h:mm a',
-      'dd/MM/yyyy h:mm a',
-      'yyyy-MM-dd HH:mm:ss',
-      'yyyy-MM-dd',
-    ];
-    for (const fmt of formats) {
-      try {
-        const p = parse(trimmed, fmt, new Date());
-        if (!Number.isNaN(p.getTime())) return p;
-      } catch {
-        // continue
-      }
-    }
-  } catch {
-    // fall through
-  }
-
-  return null;
-}
-
-function classifyUPIFlow(bankname: string | undefined): string {
-  if (!bankname || bankname.trim() === '') return 'COLLECT';
-  if (bankname.toLowerCase() === 'link') return 'INTENT';
-  return bankname;
-}
 
 export async function GET(req: Request, ctx: { params: Promise<{ uploadId: string }> }) {
   try {
@@ -72,8 +29,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
     }
 
     const url = new URL(req.url);
-    // For large files, allow up to 2M rows (was 500k).
-    const maxRows = Math.min(Math.max(Number(url.searchParams.get('maxRows') || 100000), 1), 2000000);
+    // For large files, allow up to 500k rows (was 200k). This is still a sample, not full dataset.
+    const maxRows = Math.min(Math.max(Number(url.searchParams.get('maxRows') || 100000), 1), 500000);
     const startDate = url.searchParams.get('startDate') ? new Date(String(url.searchParams.get('startDate'))) : null;
     const endDateRaw = url.searchParams.get('endDate') ? new Date(String(url.searchParams.get('endDate'))) : null;
     const endDate = endDateRaw ? new Date(endDateRaw) : null;
@@ -103,7 +60,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
 
     const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
     if (!fs.existsSync(filePath)) {
-      return NextResponse.json({
+      return NextResponse.json({ 
         error: 'Stored file missing on disk',
         storagePath: session.storedFile.storagePath,
         resolvedPath: filePath,
@@ -111,58 +68,52 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
       }, { status: 500 });
     }
 
-    // Note: this endpoint is intentionally "sample only" to keep response times safe.
-    // Full multi-GB analytics should be done server-side via ingestion + aggregation.
-    const rows: any[] = [];
+  // Note: this endpoint is intentionally "sample only" to keep response times safe.
+  // Full multi-GB analytics should be done server-side via ingestion + aggregation.
+  const rows: any[] = [];
 
-    await new Promise<void>((resolve, reject) => {
-      const stream = fs
-        .createReadStream(filePath, {
-          highWaterMark: 1024 * 1024,
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs
+      .createReadStream(filePath)
+      .pipe(
+        csvParser({
+          mapHeaders: ({ header }) => normalizeHeaderKey(String(header || '')),
+          skipLines: 0,
         })
-        .pipe(
-          fastcsv.parse({ headers: true, trim: true, ignoreEmpty: true })
-            .transform((row: any) => {
-              const lowercased: any = {};
-              for (const k of Object.keys(row)) {
-                lowercased[k.toLowerCase().trim()] = row[k];
-              }
-              return lowercased;
-            })
-        );
+      );
 
-      stream.on('data', (data) => {
-        if (startDate || endDate || paymentModeSet || merchantIdSet || pgSet || bankSet || cardTypeSet) {
-          const pm = data?.paymentmode ? String(data.paymentmode).toUpperCase().trim() : '';
-          const mid = data?.merchantid ? String(data.merchantid).trim() : '';
-          const pg = String(data?.pg || '').trim();
-          const bankname = String(data?.bankname || '').trim();
-          const cardtype = String(data?.cardtype || '').trim();
-          const txtime = parseDate(data?.txtime);
-          if (!txtime) return;
+    stream.on('data', (data) => {
+      if (startDate || endDate || paymentModeSet || merchantIdSet || pgSet || bankSet || cardTypeSet) {
+        const pm = data?.paymentmode ? String(data.paymentmode).toUpperCase().trim() : '';
+        const mid = data?.merchantid ? String(data.merchantid).trim() : '';
+        const pg = String(data?.pg || '').trim();
+        const bankname = String(data?.bankname || '').trim();
+        const cardtype = String(data?.cardtype || '').trim();
+        const txtime = parseTxTime(data?.txtime);
+        if (!txtime) return;
 
-          if (startDate && txtime < startDate) return;
-          if (endDate && txtime > endDate) return;
-          if (paymentModeSet && !paymentModeSet.has(pm)) return;
-          if (merchantIdSet && !merchantIdSet.has(mid)) return;
-          if (pgSet && !pgSet.has(pg)) return;
-          if (bankSet) {
-            const flow = classifyUPIFlow(bankname);
-            if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
-          }
-          if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
+        if (startDate && txtime < startDate) return;
+        if (endDate && txtime > endDate) return;
+        if (paymentModeSet && !paymentModeSet.has(pm)) return;
+        if (merchantIdSet && !merchantIdSet.has(mid)) return;
+        if (pgSet && !pgSet.has(pg)) return;
+        if (bankSet) {
+          const flow = classifyUPIFlow(bankname);
+          if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
         }
+        if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
+      }
 
-        rows.push(data);
-        if (rows.length >= maxRows) {
-          // Stop early once we have the sample.
-          stream.destroy();
-        }
-      });
-      stream.on('error', (err) => reject(err));
-      stream.on('end', () => resolve());
-      stream.on('close', () => resolve());
+      rows.push(data);
+      if (rows.length >= maxRows) {
+        // Stop early once we have the sample.
+        stream.destroy();
+      }
     });
+    stream.on('error', (err) => reject(err));
+    stream.on('end', () => resolve());
+    stream.on('close', () => resolve());
+  });
 
     const transactions = normalizeData(rows);
 

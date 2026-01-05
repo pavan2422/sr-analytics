@@ -2,6 +2,7 @@
 // Uses streaming parsers and Web Workers to avoid memory issues
 
 import Papa from 'papaparse';
+import { normalizeHeaderKey } from '@/lib/csv-headers';
 
 export interface ProcessingProgress {
   processed: number;
@@ -41,7 +42,7 @@ export async function streamCSVFile(
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
-      transformHeader: (header) => header.trim().toLowerCase(),
+      transformHeader: (header) => normalizeHeaderKey(header),
       chunk: (chunkResults, parser) => {
         // Pause to allow yielding/backpressure safely when we do async-ish work below.
         try {

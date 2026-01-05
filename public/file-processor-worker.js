@@ -39,6 +39,59 @@ self.onmessage = function(e) {
   }
 };
 
+// Keep header normalization consistent with the main app (`lib/csv-headers.ts`).
+function normalizeHeaderKey(header) {
+  const raw = String(header || '').trim().toLowerCase();
+  if (!raw) return '';
+
+  const underscored = raw
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  const ALIASES = {
+    tx_status: 'txstatus',
+    transaction_status: 'txstatus',
+    status: 'txstatus',
+    payment_mode: 'paymentmode',
+    payment_method: 'paymentmode',
+    tx_time: 'txtime',
+    transaction_time: 'txtime',
+    transaction_timestamp: 'txtime',
+    timestamp: 'txtime',
+    tx_amount: 'txamount',
+    transaction_amount: 'txamount',
+    amount: 'txamount',
+    merchant_id: 'merchantid',
+    merchant: 'merchantid',
+    bank_name: 'bankname',
+    bank: 'bankname',
+    card_type: 'cardtype',
+    card_country: 'cardcountry',
+    card_number: 'cardnumber',
+    card_masked: 'cardmasked',
+    tx_msg: 'txmsg',
+    tx_message: 'txmsg',
+    error_message: 'txmsg',
+    cf_error_code: 'cf_errorcode',
+    cf_error_reason: 'cf_errorreason',
+    cf_error_source: 'cf_errorsource',
+    cf_error_description: 'cf_errordescription',
+    pg_error_code: 'pg_errorcode',
+    pg_error_message: 'pg_errormessage',
+    processing_card_type: 'processingcardtype',
+    native_otp_url_eligible: 'nativeotpurleligible',
+    native_otp_eligible: 'nativeotpurleligible',
+    card_is_frictionless: 'card_isfrictionless',
+    card_native_otp_action: 'card_nativeotpaction',
+    order_amount: 'orderamount',
+    captured_amount: 'capturedamount',
+    is_cvv_present: 'iscvvpresent',
+  };
+
+  return ALIASES[underscored] || underscored;
+}
+
 // Normalize data function (same logic as main thread)
 function normalizeData(rawData) {
   if (!rawData || rawData.length === 0) {
@@ -54,7 +107,8 @@ function normalizeData(rawData) {
     
     // Normalize all keys to lowercase
     Object.keys(row).forEach((key) => {
-      const lowerKey = key.toLowerCase().trim();
+      const lowerKey = normalizeHeaderKey(key);
+      if (!lowerKey) return;
       let value = row[key];
       
       // Trim whitespace from string fields

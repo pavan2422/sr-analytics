@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
-import * as fastcsv from 'fast-csv';
-import { format, parse } from 'date-fns';
+import csvParser from 'csv-parser';
+import { format } from 'date-fns';
 import { calculateSR } from '@/lib/utils';
 import { getFailureLabel } from '@/lib/failure-utils';
 import { classifyUPIFlow } from '@/lib/data-normalization';
 import { resolveStoredFileAbsolutePath } from '@/lib/server/storage';
 import { ensureDatabaseReady } from '@/lib/server/db-ready';
+import { normalizeHeaderKey } from '@/lib/csv-headers';
+import { parseTxTime } from '@/lib/tx-time';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -22,27 +24,6 @@ function parseNumber(value: any): number {
     return Number.isNaN(parsedNum) ? 0 : parsedNum;
   }
   return 0;
-}
-
-function parseDate(value: any): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return value;
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  // Optimized: Priority to native Date for speed
-  const d = new Date(trimmed);
-  if (!Number.isNaN(d.getTime())) return d;
-
-  try {
-    const formats = ['MMMM d, yyyy, h:mm a', 'MMM d, yyyy, h:mm a', 'MM/dd/yyyy h:mm a', 'dd/MM/yyyy h:mm a', 'yyyy-MM-dd HH:mm:ss'];
-    for (const fmt of formats) {
-      const p = parse(trimmed, fmt, new Date());
-      if (!Number.isNaN(p.getTime())) return p;
-    }
-  } catch { /* ignore */ }
-  return null;
 }
 
 function norm(v: any): string {
@@ -111,7 +92,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
 
     const filePath = resolveStoredFileAbsolutePath(session.storedFile.storagePath);
     if (!fs.existsSync(filePath)) {
-      return NextResponse.json({
+      return NextResponse.json({ 
         error: 'Stored file missing on disk',
         storagePath: session.storedFile.storagePath,
         resolvedPath: filePath,
@@ -139,134 +120,130 @@ export async function GET(req: Request, ctx: { params: Promise<{ uploadId: strin
     amountBuckets.forEach((b) => amountAgg.set(b.name, { total: 0, success: 0, gmv: 0 }));
 
     await new Promise<void>((resolve, reject) => {
-      const stream = fs
-        .createReadStream(filePath, { highWaterMark: 1024 * 1024 })
-        .pipe(
-          fastcsv.parse({ headers: true, trim: true, ignoreEmpty: true })
-            .transform((row: any) => {
-              const lowercased: any = {};
-              for (const k of Object.keys(row)) {
-                lowercased[k.toLowerCase().trim()] = row[k];
-              }
-              return lowercased;
-            })
-        );
+    const stream = fs
+      .createReadStream(filePath)
+      .pipe(
+        csvParser({
+          mapHeaders: ({ header }) => normalizeHeaderKey(String(header || '')),
+          skipLines: 0,
+        })
+      );
 
-      stream.on('data', (row: any) => {
-        const pm = upper(row?.paymentmode) || 'UNKNOWN';
-        const mid = norm(row?.merchantid);
-        const pg = norm(row?.pg) || 'Unknown';
-        const bankname = norm(row?.bankname) || 'Unknown';
-        const cardtype = norm(row?.cardtype);
-        const txstatus = upper(row?.txstatus);
-        const txtime = parseDate(row?.txtime);
-        if (!txtime) return;
+    stream.on('data', (row: any) => {
+      const pm = upper(row?.paymentmode) || 'UNKNOWN';
+      const mid = norm(row?.merchantid);
+      const pg = norm(row?.pg) || 'Unknown';
+      const bankname = norm(row?.bankname) || 'Unknown';
+      const cardtype = norm(row?.cardtype);
+      const txstatus = upper(row?.txstatus);
+      const txtime = parseTxTime(row?.txtime);
+      if (!txtime) return;
 
-        if (startDate && txtime < startDate) return;
-        if (endDate && txtime > endDate) return;
-        if (paymentModeSet && !paymentModeSet.has(pm)) return;
-        if (merchantIdSet && !merchantIdSet.has(mid)) return;
-        if (pgSet && !pgSet.has(pg)) return;
-        if (bankSet) {
-          const flow = classifyUPIFlow(bankname);
-          if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
+      if (startDate && txtime < startDate) return;
+      if (endDate && txtime > endDate) return;
+      if (paymentModeSet && !paymentModeSet.has(pm)) return;
+      if (merchantIdSet && !merchantIdSet.has(mid)) return;
+      if (pgSet && !pgSet.has(pg)) return;
+      if (bankSet) {
+        const flow = classifyUPIFlow(bankname);
+        if (!bankSet.has(flow) && !bankSet.has(bankname)) return;
+      }
+      if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
+
+      const isSuccess = txstatus === 'SUCCESS';
+      const isFailed = txstatus === 'FAILED';
+      const isUserDropped = txstatus === 'USER_DROPPED';
+
+      const pmAgg = paymentModeMap.get(pm) || { total: 0, success: 0 };
+      pmAgg.total += 1;
+      if (isSuccess) pmAgg.success += 1;
+      paymentModeMap.set(pm, pmAgg);
+
+      const pgKey = (() => {
+        const pgStr = String(pg || '').trim().toUpperCase();
+        if (!pgStr || pgStr === 'N/A' || pgStr === 'NA') return 'Unknown';
+        return String(pg).trim() || 'Unknown';
+      })();
+      const pgAgg = pgMap.get(pgKey) || { total: 0, success: 0 };
+      pgAgg.total += 1;
+      if (isSuccess) pgAgg.success += 1;
+      pgMap.set(pgKey, pgAgg);
+
+      const bankAgg = bankMap.get(bankname) || { total: 0, success: 0 };
+      bankAgg.total += 1;
+      if (isSuccess) bankAgg.success += 1;
+      bankMap.set(bankname, bankAgg);
+
+      const hour = txtime.getHours();
+      hourly[hour].total += 1;
+      if (isSuccess) hourly[hour].success += 1;
+
+      const dow = txtime.getDay();
+      dayAgg[dow].total += 1;
+      if (isSuccess) dayAgg[dow].success += 1;
+
+      if (isFailed) {
+        const txForLabel: any = {
+          txstatus,
+          isUserDropped,
+          txmsg: norm(row?.txmsg),
+          cf_errorcode: norm(row?.cf_errorcode),
+          cf_errorreason: norm(row?.cf_errorreason),
+          cf_errorsource: norm(row?.cf_errorsource),
+          cf_errordescription: norm(row?.cf_errordescription),
+          pg_errorcode: norm(row?.pg_errorcode),
+          pg_errormessage: norm(row?.pg_errormessage),
+        };
+        const label = getFailureLabel(txForLabel) || norm(row?.txmsg) || 'Unknown';
+        failureCounts.set(label, (failureCounts.get(label) || 0) + 1);
+      }
+
+      const amt = parseNumber(row?.txamount);
+      for (const bucket of amountBuckets) {
+        if (amt >= bucket.min && amt < bucket.max) {
+          const a = amountAgg.get(bucket.name)!;
+          a.total += 1;
+          if (isSuccess) a.success += 1;
+          a.gmv += isSuccess ? amt : 0;
+          break;
         }
-        if (cardTypeSet && !cardTypeSet.has(cardtype)) return;
-
-        const isSuccess = txstatus === 'SUCCESS';
-        const isFailed = txstatus === 'FAILED';
-        const isUserDropped = txstatus === 'USER_DROPPED';
-
-        const pmAgg = paymentModeMap.get(pm) || { total: 0, success: 0 };
-        pmAgg.total += 1;
-        if (isSuccess) pmAgg.success += 1;
-        paymentModeMap.set(pm, pmAgg);
-
-        const pgKey = (() => {
-          const pgStr = String(pg || '').trim().toUpperCase();
-          if (!pgStr || pgStr === 'N/A' || pgStr === 'NA') return 'Unknown';
-          return String(pg).trim() || 'Unknown';
-        })();
-        const pgAgg = pgMap.get(pgKey) || { total: 0, success: 0 };
-        pgAgg.total += 1;
-        if (isSuccess) pgAgg.success += 1;
-        pgMap.set(pgKey, pgAgg);
-
-        const bankAgg = bankMap.get(bankname) || { total: 0, success: 0 };
-        bankAgg.total += 1;
-        if (isSuccess) bankAgg.success += 1;
-        bankMap.set(bankname, bankAgg);
-
-        const hour = txtime.getHours();
-        hourly[hour].total += 1;
-        if (isSuccess) hourly[hour].success += 1;
-
-        const dow = txtime.getDay();
-        dayAgg[dow].total += 1;
-        if (isSuccess) dayAgg[dow].success += 1;
-
-        if (isFailed) {
-          const txForLabel: any = {
-            txstatus,
-            isUserDropped,
-            txmsg: norm(row?.txmsg),
-            cf_errorcode: norm(row?.cf_errorcode),
-            cf_errorreason: norm(row?.cf_errorreason),
-            cf_errorsource: norm(row?.cf_errorsource),
-            cf_errordescription: norm(row?.cf_errordescription),
-            pg_errorcode: norm(row?.pg_errorcode),
-            pg_errormessage: norm(row?.pg_errormessage),
-          };
-          const label = getFailureLabel(txForLabel) || norm(row?.txmsg) || 'Unknown';
-          failureCounts.set(label, (failureCounts.get(label) || 0) + 1);
-        }
-
-        const amt = parseNumber(row?.txamount);
-        for (const bucket of amountBuckets) {
-          if (amt >= bucket.min && amt < bucket.max) {
-            const a = amountAgg.get(bucket.name)!;
-            a.total += 1;
-            if (isSuccess) a.success += 1;
-            a.gmv += isSuccess ? amt : 0;
-            break;
-          }
-        }
-      });
-
-      stream.on('error', (err) => reject(err));
-      stream.on('end', () => resolve());
-      stream.on('close', () => resolve());
+      }
     });
 
-    const paymentModeData = toSortedBarData(paymentModeMap);
-    const pgData = toSortedBarData(pgMap);
-    const banksData = toSortedBarData(bankMap).slice(0, 30);
+    stream.on('error', (err) => reject(err));
+    stream.on('end', () => resolve());
+    stream.on('close', () => resolve());
+  });
 
-    const hourlyData = hourly.map((h, hour) => ({
-      name: `${hour.toString().padStart(2, '0')}:00`,
-      volume: h.total,
-      sr: calculateSR(h.success, h.total),
-    }));
+  const paymentModeData = toSortedBarData(paymentModeMap);
+  const pgData = toSortedBarData(pgMap);
+  const banksData = toSortedBarData(bankMap).slice(0, 30);
 
-    const failureReasonsData = Array.from(failureCounts.entries())
-      .map(([name, count]) => ({ name, volume: count }))
-      .sort((a, b) => b.volume - a.volume)
-      .slice(0, 100);
+  const hourlyData = hourly.map((h, hour) => ({
+    name: `${hour.toString().padStart(2, '0')}:00`,
+    volume: h.total,
+    sr: calculateSR(h.success, h.total),
+  }));
 
-    const amountDistributionData = amountBuckets
-      .map((b) => {
-        const a = amountAgg.get(b.name)!;
-        return { name: b.name, volume: a.total, gmv: a.gmv, sr: calculateSR(a.success, a.total) };
-      })
-      .filter((d) => d.volume > 0);
+  const failureReasonsData = Array.from(failureCounts.entries())
+    .map(([name, count]) => ({ name, volume: count }))
+    .sort((a, b) => b.volume - a.volume)
+    .slice(0, 100);
 
-    const scatterData = paymentModeData.map((d) => ({ name: d.name, volume: d.volume, sr: d.sr || 0 }));
+  const amountDistributionData = amountBuckets
+    .map((b) => {
+      const a = amountAgg.get(b.name)!;
+      return { name: b.name, volume: a.total, gmv: a.gmv, sr: calculateSR(a.success, a.total) };
+    })
+    .filter((d) => d.volume > 0);
 
-    const dayOfWeekData = DAY_NAMES.map((name, idx) => ({
-      name,
-      volume: dayAgg[idx].total,
-      sr: calculateSR(dayAgg[idx].success, dayAgg[idx].total),
-    }));
+  const scatterData = paymentModeData.map((d) => ({ name: d.name, volume: d.volume, sr: d.sr || 0 }));
+
+  const dayOfWeekData = DAY_NAMES.map((name, idx) => ({
+    name,
+    volume: dayAgg[idx].total,
+    sr: calculateSR(dayAgg[idx].success, dayAgg[idx].total),
+  }));
 
     return NextResponse.json(
       {
