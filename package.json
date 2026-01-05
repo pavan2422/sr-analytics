@@ -7,10 +7,11 @@
     "clean:dev": "rimraf .next-dev",
     "clean:build": "rimraf .next",
     "dev": "npm run clean:dev && next dev",
-    "build": "npm run prisma:generate && npm run clean:build && next build",
+    "build": "npm run prisma:migrate:deploy && npm run prisma:generate && npm run clean:build && next build",
     "start": "next start",
     "lint": "next lint",
     "prisma:generate": "prisma generate",
+    "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio"
   },

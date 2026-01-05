@@ -3,8 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  // Use DATABASE_URL if set (for Vercel/serverless), otherwise default to local dev.db
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 

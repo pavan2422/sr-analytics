@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import { Transaction, FilterState, Metrics, DailyTrend, GroupedMetrics, FailureRCA, RCAInsight, PeriodComparison } from '@/types';
 import { calculateSR, safeDivide } from '@/lib/utils';
 import { normalizeData, classifyUPIFlow } from '@/lib/data-normalization';
+import { normalizeHeaderKey } from '@/lib/csv-headers';
 import { indexedDBStorage } from './indexedDBStorage';
 import { streamCSVFile, processExcelFile, ProcessingProgress } from '@/lib/file-processor';
 import { WorkerManager } from '@/lib/worker-manager';
@@ -211,6 +212,7 @@ async function streamCSVSampleToMemory(
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
+      transformHeader: (header) => normalizeHeaderKey(header),
       // IMPORTANT: PapaParse `worker: true` does NOT support parser.pause()/resume()
       // (it throws "Not implemented"). We keep parsing on the main thread but
       // normalize in our own worker and use pause/resume for backpressure.
@@ -347,6 +349,7 @@ async function streamCSVToIndexedDB(file: File, progressCallback: (progress: Pro
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
+      transformHeader: (header) => normalizeHeaderKey(header),
       // IMPORTANT: PapaParse `worker: true` does NOT support parser.pause()/resume()
       // (it throws "Not implemented"). We keep parsing on the main thread but
       // normalize in our own worker and use pause/resume for backpressure.
@@ -861,7 +864,7 @@ export const useStore = create<StoreState>()(
               const result = Papa.parse(text, {
                 header: true,
                 skipEmptyLines: true,
-                transformHeader: (header) => header.trim().toLowerCase(),
+                transformHeader: (header) => normalizeHeaderKey(header),
               });
               rawData = result.data as any[];
               set({ progress: { processed: rawData.length, total: rawData.length, percentage: 50, stage: 'parsing' } });
@@ -1191,7 +1194,7 @@ export const useStore = create<StoreState>()(
             const result = Papa.parse(text, {
               header: true,
               skipEmptyLines: true,
-              transformHeader: (header) => header.trim().toLowerCase(),
+              transformHeader: (header) => normalizeHeaderKey(header),
             });
             rawData = result.data as any[];
             set({ progress: { processed: rawData.length, total: rawData.length, percentage: 50, stage: 'parsing' } });

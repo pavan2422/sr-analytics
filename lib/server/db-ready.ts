@@ -7,6 +7,17 @@ declare global {
   var __srDbReadyPromise: Promise<void> | undefined;
 }
 
+function isPostgresUrl(dbUrl: string | undefined): boolean {
+  const u = String(dbUrl || '').trim().toLowerCase();
+  return u.startsWith('postgres://') || u.startsWith('postgresql://');
+}
+
+function isSqliteUrl(dbUrl: string | undefined): boolean {
+  const u = String(dbUrl || '').trim().toLowerCase();
+  // Prisma SQLite URLs are typically: file:./dev.db or file:../...
+  return u.startsWith('file:') || u.includes('sqlite');
+}
+
 function isSqliteBusyError(err: any): boolean {
   const msg = String(err?.message || '');
   return msg.includes('SQLITE_BUSY') || /database is locked/i.test(msg);
@@ -20,6 +31,8 @@ function isMissingTableOrSchemaError(err: any): boolean {
   if (/no such table/i.test(msg)) return true;
   // Sometimes shows up as "The table `main.UploadSession` does not exist"
   if (/table .* does not exist/i.test(msg)) return true;
+  // Postgres surface area: "relation \"UploadSession\" does not exist"
+  if (/relation .* does not exist/i.test(msg)) return true;
   return false;
 }
 
@@ -105,27 +118,36 @@ export async function ensureDatabaseReady(): Promise<void> {
   if (global.__srDbReadyPromise) return global.__srDbReadyPromise;
 
   global.__srDbReadyPromise = (async () => {
+    const dbUrl = process.env.DATABASE_URL;
+    const usingPostgres = isPostgresUrl(dbUrl);
+    const usingSqlite = isSqliteUrl(dbUrl) || !dbUrl; // default local sqlite dev.db when unset
+
     try {
       // Ensure the database directory exists
       // On serverless, use /tmp; otherwise use project directory
       const isServerless = Boolean(process.env.VERCEL) || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
       let dbDir: string;
       
-      if (isServerless) {
+      // Only relevant for SQLite file DBs.
+      if (usingSqlite && isServerless) {
         dbDir = '/tmp/prisma';
-      } else {
+      } else if (usingSqlite) {
         const dbPath = path.join(process.cwd(), 'prisma', 'dev.db');
         dbDir = path.dirname(dbPath);
+      } else {
+        dbDir = '';
       }
       
-      try {
-        fs.mkdirSync(dbDir, { recursive: true });
-      } catch (e: any) {
-        // Ignore if directory already exists
-        if (e?.code !== 'EEXIST') {
-          // Only throw if it's a different error
-          if (!e?.message?.includes('already exists')) {
-            throw e;
+      if (dbDir) {
+        try {
+          fs.mkdirSync(dbDir, { recursive: true });
+        } catch (e: any) {
+          // Ignore if directory already exists
+          if (e?.code !== 'EEXIST') {
+            // Only throw if it's a different error
+            if (!e?.message?.includes('already exists')) {
+              throw e;
+            }
           }
         }
       }
@@ -139,14 +161,21 @@ export async function ensureDatabaseReady(): Promise<void> {
 
       if (!isMissingTableOrSchemaError(err)) throw err;
 
-      // Tables are missing - create them directly using raw SQL
-      // This avoids needing Prisma CLI which doesn't work on Vercel
+      // If we're on Postgres (recommended for Vercel), do NOT attempt SQLite raw SQL table creation.
+      // The correct fix is to run Prisma migrations (prisma migrate deploy/dev).
+      if (usingPostgres) {
+        throw new Error(
+          `Database tables are missing. Run Prisma migrations for Postgres (e.g. "prisma migrate deploy"). ` +
+          `Original error: ${String(err?.message || 'Unknown')}`
+        );
+      }
+
+      // SQLite only: create tables directly using raw SQL (helps on fresh deploys without migrations).
       try {
         await createTablesDirectly();
       } catch (createErr: any) {
-        // If table creation fails, throw a more helpful error
         throw new Error(
-          `Failed to create database tables: ${createErr?.message || 'Unknown error'}. ` +
+          `Failed to create SQLite database tables: ${createErr?.message || 'Unknown error'}. ` +
           `Original error: ${err?.message || 'Unknown'}`,
           { cause: createErr }
         );

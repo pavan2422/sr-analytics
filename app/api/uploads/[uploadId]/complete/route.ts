@@ -39,8 +39,37 @@ export async function POST(req: Request, ctx: { params: Promise<{ uploadId: stri
     );
   }
 
-  const session = await prisma.uploadSession.findUnique({ where: { id: uploadId } });
-  if (!session) return NextResponse.json({ error: 'Upload session not found' }, { status: 404 });
+  // Retry logic to handle race conditions on serverless platforms where
+  // session creation might not be immediately visible
+  let session = null;
+  const maxRetries = 5;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    session = await prisma.uploadSession.findUnique({ where: { id: uploadId } });
+    
+    if (session) {
+      break; // Session found, exit retry loop
+    }
+    
+    // If not found and we have retries left, wait a bit before retrying
+    if (attempt < maxRetries - 1) {
+      // Exponential backoff: 100ms, 200ms, 400ms, 800ms
+      await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, attempt)));
+    }
+  }
+  
+  if (!session) {
+    const dbUrl = process.env.DATABASE_URL || 'default (sqlite dev.db)';
+    console.error(`[Upload Error] Session ${uploadId} not found in DB after ${maxRetries} retries. DB_URL=${dbUrl}`);
+    return NextResponse.json({ 
+      error: 'Upload session not found',
+      debug: {
+        uploadId,
+        message: 'This often happens on serverless (Vercel) if DATABASE_URL is not set to a persistent DB.',
+        dbUrl: process.env.DATABASE_URL ? '[REDACTED]' : 'CACHE_LOCAL_SQLITE',
+        retries: maxRetries
+      }
+    }, { status: 404 });
+  }
   if (session.status === 'completed') {
     return NextResponse.json({ ok: true, uploadId, storedFileId: session.storedFileId }, { status: 200 });
   }
