@@ -647,14 +647,17 @@ export const useStore = create<StoreState>()(
 
           const fileExtension = file.name.split('.').pop()?.toLowerCase();
 
-          // For large files we always do a backend-resumable chunked upload first.
-          // Then we *always* try to ingest into IndexedDB for full interactivity (all features).
-          // IndexedDB can handle multi-GB files (browsers typically allow 50% of disk space).
-          // If browser quota/memory can't handle it, we fall back to a bounded sample (still stable).
+          // Large-file strategy:
+          // - On Vercel/serverless, backend chunk uploads store parts on local disk which is NOT shared
+          //   across instances → finalize can fail with "Missing parts".
+          // - Default is to use IndexedDB streaming for large files (browser-local, reliable on Vercel).
+          // - Backend chunked upload can be re-enabled only if the backend has shared/persistent storage
+          //   (S3/R2/Vercel Blob/etc). Gate it behind NEXT_PUBLIC_ENABLE_BACKEND_UPLOAD=true.
+          const enableBackendUpload = process.env.NEXT_PUBLIC_ENABLE_BACKEND_UPLOAD === 'true';
           const backendUploadThresholdBytes = 100 * 1024 * 1024; // 100MB
           // Removed size limit - IndexedDB can handle very large files (2GB+)
           // Browser quota limits will be handled gracefully with error messages
-          const shouldUseBackendUpload = fileExtension === 'csv' && file.size >= backendUploadThresholdBytes;
+          const shouldUseBackendUpload = enableBackendUpload && fileExtension === 'csv' && file.size >= backendUploadThresholdBytes;
 
           // For files > 100MB, use IndexedDB streaming mode
           const useIndexedDBMode = !shouldUseBackendUpload && (file.size > 100 * 1024 * 1024 || fileSizeMB > 100);
