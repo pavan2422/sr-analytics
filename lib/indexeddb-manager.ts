@@ -261,7 +261,8 @@ class IndexedDBTransactionManager implements DBManager {
       pgs?: string[];
       banks?: string[];
       cardTypes?: string[];
-    }
+    },
+    options?: { signal?: AbortSignal }
   ): Promise<void> {
     await this.init();
     if (!this.db) throw new Error('Database not initialized');
@@ -274,11 +275,32 @@ class IndexedDBTransactionManager implements DBManager {
       let chunk: Transaction[] = [];
       let pendingChunks: Transaction[][] = [];
       let hasError = false;
+      let aborted = false;
+
+      const abortNow = () => {
+        if (aborted) return;
+        aborted = true;
+        hasError = true; // prevent further processing / rejection
+        try {
+          transaction.abort();
+        } catch {
+          // ignore
+        }
+      };
+
+      if (options?.signal) {
+        if (options.signal.aborted) {
+          abortNow();
+          resolve();
+          return;
+        }
+        options.signal.addEventListener('abort', abortNow, { once: true });
+      }
 
       // Process all pending chunks asynchronously (outside transaction)
       const processAllPendingChunks = async (): Promise<void> => {
         for (const chunkToProcess of pendingChunks) {
-          if (hasError) return;
+          if (hasError || aborted) return;
           try {
             await onChunk(chunkToProcess);
             // Yield to browser periodically
@@ -292,12 +314,13 @@ class IndexedDBTransactionManager implements DBManager {
       };
 
       request.onerror = () => {
+        if (aborted) return;
         hasError = true;
         reject(request.error);
       };
 
       request.onsuccess = (event) => {
-        if (hasError) return;
+        if (hasError || aborted) return;
 
         const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
         
@@ -311,7 +334,9 @@ class IndexedDBTransactionManager implements DBManager {
           // Process all pending chunks after transaction completes
           transaction.oncomplete = async () => {
             try {
-              await processAllPendingChunks();
+              if (!aborted) {
+                await processAllPendingChunks();
+              }
               if (!hasError) resolve();
             } catch (error) {
               if (!hasError) {
@@ -371,8 +396,14 @@ class IndexedDBTransactionManager implements DBManager {
 
       // Handle transaction errors
       transaction.onerror = () => {
+        if (aborted) return;
         hasError = true;
         reject(transaction.error);
+      };
+      transaction.onabort = () => {
+        // Treat abort (used for cancellation / early-stop sampling) as success.
+        aborted = true;
+        resolve();
       };
     });
   }
@@ -401,16 +432,25 @@ class IndexedDBTransactionManager implements DBManager {
     cardTypes?: string[];
   }): Promise<Transaction[]> {
     const results: Transaction[] = [];
+    const ac = new AbortController();
     
     await this.streamTransactions(
       async (chunk) => {
-        if (results.length < maxRows) {
-          const remaining = maxRows - results.length;
+        if (results.length >= maxRows) {
+          ac.abort();
+          return;
+        }
+        const remaining = maxRows - results.length;
+        if (remaining > 0) {
           results.push(...chunk.slice(0, remaining));
+        }
+        if (results.length >= maxRows) {
+          ac.abort(); // stop scanning the whole DB once we have enough
         }
       },
       50000,
-      filters
+      filters,
+      { signal: ac.signal }
     );
 
     return results;
@@ -449,7 +489,8 @@ class IndexedDBTransactionManager implements DBManager {
     };
   }
 
-  async aggregateMetrics(filters?: {
+  async aggregateMetrics(
+    filters?: {
     startDate?: Date;
     endDate?: Date;
     paymentModes?: string[];
@@ -457,7 +498,9 @@ class IndexedDBTransactionManager implements DBManager {
     pgs?: string[];
     banks?: string[];
     cardTypes?: string[];
-  }): Promise<{
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<{
     totalCount: number;
     successCount: number;
     failedCount: number;
@@ -520,7 +563,8 @@ class IndexedDBTransactionManager implements DBManager {
         }
       },
       50000,
-      filters
+      filters,
+      options
     );
 
     const dailyTrends = Array.from(dailyMap.values())

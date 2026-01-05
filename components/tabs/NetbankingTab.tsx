@@ -36,8 +36,6 @@ export function NetbankingTab() {
     (async () => {
       const txs = await getSampleFilteredTransactions(100000, {
         paymentModes: NETBANKING_PAYMENT_MODES as unknown as string[],
-        pgs: tabFilters.pgs.length ? tabFilters.pgs : undefined,
-        banks: tabFilters.banks.length ? tabFilters.banks : undefined,
       });
       if (!cancelled) setSample(txs);
     })().catch(() => {
@@ -46,7 +44,7 @@ export function NetbankingTab() {
     return () => {
       cancelled = true;
     };
-  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions, tabFilters.pgs, tabFilters.banks]);
+  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions]);
 
   const nbMetrics = useMemo(() => {
     const source = _useIndexedDB ? sample : filteredTransactions;

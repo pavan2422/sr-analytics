@@ -37,8 +37,6 @@ export function UPITab() {
     (async () => {
       const txs = await getSampleFilteredTransactions(100000, {
         paymentModes: UPI_PAYMENT_MODES as unknown as string[],
-        pgs: tabFilters.pgs.length ? tabFilters.pgs : undefined,
-        banks: tabFilters.banks.length ? tabFilters.banks : undefined,
       });
       if (!cancelled) setSample(txs);
     })().catch(() => {
@@ -47,7 +45,7 @@ export function UPITab() {
     return () => {
       cancelled = true;
     };
-  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions, tabFilters.pgs, tabFilters.banks]);
+  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions]);
 
   const upiMetrics = useMemo(() => {
     const source = _useIndexedDB ? sample : filteredTransactions;

@@ -13,15 +13,14 @@ interface TabFiltersProps {
 
 export function TabFilters({ paymentMode }: TabFiltersProps) {
   const rawTransactions = useStore((s) => s.rawTransactions);
-  const tabFilters = useStore((s) => s.tabFilters);
+  const tabKey = paymentMode.join('|');
+  const local = useStore((s) => s.tabFilters[tabKey] || { pgs: [], banks: [], cardTypes: [] });
   const setTabFilters = useStore((s) => s.setTabFilters);
   const _useIndexedDB = useStore((s) => s._useIndexedDB);
   const filteredTransactionCount = useStore((s) => s.filteredTransactionCount);
   const getSampleFilteredTransactions = useStore((s) => s.getSampleFilteredTransactions);
 
   const [sample, setSample] = useState<Transaction[]>([]);
-  const paymentModeKey = useMemo(() => paymentMode.join('|'), [paymentMode]);
-  const local = tabFilters[paymentModeKey] || { pgs: [], banks: [], cardTypes: [] };
 
   useEffect(() => {
     if (!_useIndexedDB) {
@@ -45,7 +44,7 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
     return () => {
       cancelled = true;
     };
-  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions, paymentModeKey, paymentMode]);
+  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions, tabKey, paymentMode]);
 
   // Filter transactions by payment mode
   const filteredTxs = useMemo(() => {
@@ -105,7 +104,7 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
               label="PG"
               options={pgs}
               value={local.pgs}
-              onChange={(selected) => setTabFilters(paymentModeKey, { pgs: selected })}
+              onChange={(selected) => setTabFilters(tabKey, { pgs: selected })}
               placeholder="Select PG..."
             />
           </div>
@@ -118,7 +117,7 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
               label={isUPITab ? "Flow Type" : "Bank"}
               options={banks}
               value={local.banks}
-              onChange={(selected) => setTabFilters(paymentModeKey, { banks: selected })}
+              onChange={(selected) => setTabFilters(tabKey, { banks: selected })}
               placeholder={isUPITab ? "Select Flow Type..." : "Select Bank..."}
             />
           </div>
@@ -134,7 +133,7 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
                   key={cardType}
                   onClick={() => {
                     const isSelected = local.cardTypes.includes(cardType);
-                    setTabFilters(paymentModeKey, {
+                    setTabFilters(tabKey, {
                       cardTypes: isSelected
                         ? local.cardTypes.filter((ct) => ct !== cardType)
                         : [...local.cardTypes, cardType],

@@ -378,6 +378,7 @@ async function processAndStoreChunks(rawData: any[], progressCallback: (progress
 let filterTimeout: ReturnType<typeof setTimeout> | null = null;
 let metricsTimeout: ReturnType<typeof setTimeout> | number | null = null;
 let isComputing = false;
+let indexedDbAggAbort: AbortController | null = null;
 
 // Cancel pending filter computations
 const cancelPendingFilter = () => {
@@ -710,6 +711,14 @@ export const useStore = create<StoreState>()(
         set({ analysisStage: 'FILTERING' });
 
         if (_useIndexedDB) {
+          // Abort any previous long-running IndexedDB scan (prevents overlaps/freezes on rapid filter changes)
+          try {
+            indexedDbAggAbort?.abort();
+          } catch {
+            // ignore
+          }
+          indexedDbAggAbort = new AbortController();
+
           // For large datasets in IndexedDB, compute count + metrics in ONE streaming pass
           // to avoid double-scanning and to prevent loading huge arrays into memory.
           set({ analysisStage: 'COMPUTING', filteredTransactions: [] });
@@ -724,7 +733,7 @@ export const useStore = create<StoreState>()(
           };
 
           await dbManager.init();
-          const agg = await dbManager.aggregateMetrics(effFilters);
+          const agg = await dbManager.aggregateMetrics(effFilters, { signal: indexedDbAggAbort.signal });
 
           const globalMetrics = {
             totalCount: agg.totalCount,

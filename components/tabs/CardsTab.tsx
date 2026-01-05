@@ -36,9 +36,6 @@ export function CardsTab() {
     (async () => {
       const txs = await getSampleFilteredTransactions(100000, {
         paymentModes: CARD_PAYMENT_MODES as unknown as string[],
-        pgs: tabFilters.pgs.length ? tabFilters.pgs : undefined,
-        banks: tabFilters.banks.length ? tabFilters.banks : undefined,
-        cardTypes: tabFilters.cardTypes.length ? tabFilters.cardTypes : undefined,
       });
       if (!cancelled) setSample(txs);
     })().catch(() => {
@@ -51,9 +48,6 @@ export function CardsTab() {
     _useIndexedDB,
     filteredTransactionCount,
     getSampleFilteredTransactions,
-    tabFilters.pgs,
-    tabFilters.banks,
-    tabFilters.cardTypes,
   ]);
 
   const cardMetrics = useMemo(() => {
