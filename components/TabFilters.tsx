@@ -34,18 +34,24 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
       }
       let cancelled = false;
       (async () => {
-        const params = new URLSearchParams();
-        for (const pm of paymentMode) params.append('paymentModes', pm);
-        const res = await fetch(`/api/uploads/${backendUploadId}/filter-options?${params.toString()}`);
-        if (!res.ok) throw new Error(`Failed to load filter options (${res.status})`);
-        const json = (await res.json()) as { pgs?: string[]; banks?: string[]; cardTypes?: string[] };
-        if (!cancelled) {
-          setBackendOptions({
-            pgs: (json.pgs || []).filter(Boolean).sort(),
-            banks: (json.banks || []).filter(Boolean).sort(),
-            cardTypes: (json.cardTypes || []).filter(Boolean).sort(),
-          });
-        }
+        const { retryApiCall } = await import('@/lib/retry-api');
+        await retryApiCall(async () => {
+          const params = new URLSearchParams();
+          for (const pm of paymentMode) params.append('paymentModes', pm);
+          const res = await fetch(`/api/uploads/${backendUploadId}/filter-options?${params.toString()}`);
+          if (!res.ok) {
+            const msg = await res.text().catch(() => '');
+            throw new Error(`Failed to load filter options (${res.status}): ${msg}`);
+          }
+          const json = (await res.json()) as { pgs?: string[]; banks?: string[]; cardTypes?: string[] };
+          if (!cancelled) {
+            setBackendOptions({
+              pgs: (json.pgs || []).filter(Boolean).sort(),
+              banks: (json.banks || []).filter(Boolean).sort(),
+              cardTypes: (json.cardTypes || []).filter(Boolean).sort(),
+            });
+          }
+        });
       })().catch(() => {
         if (!cancelled) setBackendOptions(null);
       });

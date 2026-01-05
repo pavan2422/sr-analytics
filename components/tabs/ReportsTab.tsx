@@ -89,27 +89,31 @@ export function ReportsTab() {
     try {
       if (_useIndexedDB && _useBackend) {
         if (!backendUploadId) throw new Error('Missing backend upload id');
-        const res = await fetch(`/api/uploads/${backendUploadId}/report`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            reportType,
-            selectedPaymentModes,
-            filters: {
-              startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
-              endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
-              paymentModes: filters.paymentModes || [],
-              merchantIds: filters.merchantIds || [],
-              pgs: filters.pgs || [],
-              banks: filters.banks || [],
-              cardTypes: filters.cardTypes || [],
-            },
-          }),
+        const { retryApiCall } = await import('@/lib/retry-api');
+        const res = await retryApiCall(async () => {
+          const r = await fetch(`/api/uploads/${backendUploadId}/report`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              reportType,
+              selectedPaymentModes,
+              filters: {
+                startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
+                endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
+                paymentModes: filters.paymentModes || [],
+                merchantIds: filters.merchantIds || [],
+                pgs: filters.pgs || [],
+                banks: filters.banks || [],
+                cardTypes: filters.cardTypes || [],
+              },
+            }),
+          });
+          if (!r.ok) {
+            const msg = await r.text().catch(() => '');
+            throw new Error(`Failed to generate backend report (${r.status}): ${msg}`);
+          }
+          return r;
         });
-        if (!res.ok) {
-          const msg = await res.text().catch(() => '');
-          throw new Error(`Failed to generate backend report (${res.status}): ${msg}`);
-        }
 
         const blob = await res.blob();
         const cd = res.headers.get('content-disposition') || '';

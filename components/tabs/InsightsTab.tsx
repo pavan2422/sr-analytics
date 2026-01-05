@@ -42,23 +42,27 @@ export function InsightsTab() {
           // Backend mode: compute insights server-side from the full stored CSV (no sampling).
           if (useBackend) {
             if (!backendUploadId) throw new Error('Missing backend upload id');
-            const res = await fetch(`/api/uploads/${backendUploadId}/insights`, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({
-                startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
-                endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
-                paymentModes: filters.paymentModes || [],
-                merchantIds: filters.merchantIds || [],
-                pgs: filters.pgs || [],
-                banks: filters.banks || [],
-                cardTypes: filters.cardTypes || [],
-              }),
+            const { retryApiCall } = await import('@/lib/retry-api');
+            const res = await retryApiCall(async () => {
+              const r = await fetch(`/api/uploads/${backendUploadId}/insights`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                  startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
+                  endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
+                  paymentModes: filters.paymentModes || [],
+                  merchantIds: filters.merchantIds || [],
+                  pgs: filters.pgs || [],
+                  banks: filters.banks || [],
+                  cardTypes: filters.cardTypes || [],
+                }),
+              });
+              if (!r.ok) {
+                const msg = await r.text().catch(() => '');
+                throw new Error(`Failed to compute backend insights (${r.status}): ${msg}`);
+              }
+              return r;
             });
-            if (!res.ok) {
-              const msg = await res.text().catch(() => '');
-              throw new Error(`Failed to compute backend insights (${res.status}): ${msg}`);
-            }
             const json = (await res.json()) as { insights: FailureInsight[] };
             setInsights(json.insights || []);
             setCurrentPage(1);

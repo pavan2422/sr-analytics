@@ -80,27 +80,7 @@ const defaultFilters: FilterState = {
 // Worker manager instances (shared across store)
 const workerManager = new WorkerManager();
 
-// Helper function to retry API calls with exponential backoff for 404 errors
-async function retryApiCall<T>(
-  fn: () => Promise<T>,
-  maxRetries: number = 3,
-  isRetryable: (error: any) => boolean = (e) => e?.message?.includes('404') || e?.message?.includes('not found')
-): Promise<T> {
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error: any) {
-      lastError = error;
-      if (isRetryable(error) && attempt < maxRetries - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw lastError || new Error('Failed after retries');
-}
+import { retryApiCall } from '@/lib/retry-api';
 
 async function fetchBackendSample(uploadId: string, maxRows: number) {
   return retryApiCall(async () => {
@@ -730,8 +710,38 @@ export const useStore = create<StoreState>()(
           backendStoredFileId: storedFileId,
         });
 
+        // Wait for upload session to be fully completed BEFORE any API calls
+        // This prevents 404 errors due to race conditions on serverless platforms
+        let sessionReady = false;
+        let retries = 0;
+        const maxRetries = 15; // Increased retries for slower serverless environments
+        while (!sessionReady && retries < maxRetries) {
+          try {
+            const sessionRes = await fetch(`/api/uploads/${uploadId}`);
+            if (sessionRes.ok) {
+              const sessionData = await sessionRes.json();
+              if (sessionData.status === 'completed' && sessionData.storedFileId) {
+                sessionReady = true;
+                break;
+              }
+            }
+          } catch {
+            // Continue retrying
+          }
+          retries++;
+          if (!sessionReady) {
+            // Exponential backoff: 500ms, 1000ms, 1500ms, etc.
+            await new Promise(resolve => setTimeout(resolve, 500 * (retries + 1)));
+          }
+        }
+
+        if (!sessionReady) {
+          console.warn(`Session ${uploadId} not ready after ${maxRetries} retries, proceeding anyway`);
+        }
+
         // Pull a bounded sample from the stored file for tab-specific charts/tables.
         // Aggregates (global + trends) will come from backend metrics.
+        // fetchBackendSample already has retry logic, but we wait for session to be ready first
         const sample = await fetchBackendSample(uploadId, maxSampleRows);
         set({
           _useIndexedDB: true,
@@ -749,30 +759,6 @@ export const useStore = create<StoreState>()(
           progress: { processed: sample.transactions.length, total: sample.transactions.length, percentage: 100, stage: 'complete' },
           _skipPersistence: false,
         });
-
-        // Wait for upload session to be fully completed before fetching metrics
-        // This prevents 404 errors due to race conditions on serverless platforms
-        let sessionReady = false;
-        let retries = 0;
-        const maxRetries = 10;
-        while (!sessionReady && retries < maxRetries) {
-          try {
-            const sessionRes = await fetch(`/api/uploads/${uploadId}`);
-            if (sessionRes.ok) {
-              const sessionData = await sessionRes.json();
-              if (sessionData.status === 'completed' && sessionData.storedFileId) {
-                sessionReady = true;
-                break;
-              }
-            }
-          } catch {
-            // Continue retrying
-          }
-          retries++;
-          if (!sessionReady) {
-            await new Promise(resolve => setTimeout(resolve, 500 * retries)); // Exponential backoff
-          }
-        }
 
         if (sessionReady) {
           await get().applyFilters();

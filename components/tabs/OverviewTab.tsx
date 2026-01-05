@@ -50,11 +50,15 @@ export function OverviewTab() {
           for (const b of filters.banks || []) params.append('banks', b);
           for (const ct of filters.cardTypes || []) params.append('cardTypes', ct);
 
-          const res = await fetch(`/api/uploads/${backendUploadId}/overview-breakdowns?${params.toString()}`);
-          if (!res.ok) {
-            const msg = await res.text().catch(() => '');
-            throw new Error(`Failed to load breakdowns (${res.status}): ${msg}`);
-          }
+          const { retryApiCall } = await import('@/lib/retry-api');
+          const res = await retryApiCall(async () => {
+            const r = await fetch(`/api/uploads/${backendUploadId}/overview-breakdowns?${params.toString()}`);
+            if (!r.ok) {
+              const msg = await r.text().catch(() => '');
+              throw new Error(`Failed to load breakdowns (${r.status}): ${msg}`);
+            }
+            return r;
+          });
           const json = (await res.json()) as OverviewBreakdowns;
           if (!cancelled) {
             setSample([]); // not used in backend mode

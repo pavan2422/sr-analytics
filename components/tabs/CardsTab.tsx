@@ -40,22 +40,28 @@ export function CardsTab() {
       let cancelled = false;
       setIsLoadingBackend(true);
       (async () => {
-        const res = await fetch(`/api/uploads/${backendUploadId}/card-metrics`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
-            endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
-            paymentModes: filters.paymentModes || [],
-            merchantIds: filters.merchantIds || [],
-            pgs: filters.pgs || [],
-            banks: filters.banks || [],
-            cardTypes: filters.cardTypes || [],
-          }),
+        const { retryApiCall } = await import('@/lib/retry-api');
+        await retryApiCall(async () => {
+          const res = await fetch(`/api/uploads/${backendUploadId}/card-metrics`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              startDate: filters.dateRange.start ? filters.dateRange.start.toISOString() : null,
+              endDate: filters.dateRange.end ? filters.dateRange.end.toISOString() : null,
+              paymentModes: filters.paymentModes || [],
+              merchantIds: filters.merchantIds || [],
+              pgs: filters.pgs || [],
+              banks: filters.banks || [],
+              cardTypes: filters.cardTypes || [],
+            }),
+          });
+          if (!res.ok) {
+            const msg = await res.text().catch(() => '');
+            throw new Error(`Failed to load card metrics (${res.status}): ${msg}`);
+          }
+          const json = (await res.json()) as ReturnType<typeof computeCardMetrics>;
+          if (!cancelled) setBackendMetrics(json);
         });
-        if (!res.ok) throw new Error(`Failed to load card metrics (${res.status})`);
-        const json = (await res.json()) as ReturnType<typeof computeCardMetrics>;
-        if (!cancelled) setBackendMetrics(json);
       })()
         .catch(() => {
           if (!cancelled) setBackendMetrics(null);
