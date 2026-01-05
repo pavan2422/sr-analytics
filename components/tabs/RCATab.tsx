@@ -75,9 +75,15 @@ export function RCATab() {
           });
         } else {
           // Small dataset path: compute exact periods from the in-memory filtered set.
-          const times = filteredTransactions.map((t) => t.txtime.getTime());
-          const maxTime = times.length ? Math.max(...times) : Date.now();
-          const currentPeriodEnd = new Date(maxTime);
+          // IMPORTANT: never do Math.max(...bigArray) — it can throw "Maximum call stack size exceeded"
+          // for large datasets due to argument spreading limits.
+          let maxTime = 0;
+          for (let i = 0; i < filteredTransactions.length; i++) {
+            const t = filteredTransactions[i]!.txtime;
+            const ms = (t instanceof Date ? t : new Date(t as any)).getTime();
+            if (ms > maxTime) maxTime = ms;
+          }
+          const currentPeriodEnd = new Date(maxTime || Date.now());
           const currentPeriodStart = subDays(currentPeriodEnd, periodDays);
           const previousPeriodEnd = subDays(currentPeriodStart, 1);
           const previousPeriodStart = subDays(previousPeriodEnd, periodDays);
