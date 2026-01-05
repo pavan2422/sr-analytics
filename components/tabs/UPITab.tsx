@@ -9,8 +9,10 @@ import { TabFilters } from '@/components/TabFilters';
 import { ColumnDef } from '@tanstack/react-table';
 import { GroupedMetrics, FailureRCA, Transaction } from '@/types';
 import { formatNumber } from '@/lib/utils';
+import { classifyUPIFlow } from '@/lib/data-normalization';
 
 const UPI_PAYMENT_MODES = ['UPI', 'UPI_CREDIT_CARD', 'UPI_PPI'] as const;
+const TAB_KEY = UPI_PAYMENT_MODES.join('|');
 
 export function UPITab() {
   // Use selector to only subscribe to filteredTransactions
@@ -18,6 +20,7 @@ export function UPITab() {
   const _useIndexedDB = useStore((state) => state._useIndexedDB);
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
+  const tabFilters = useStore((state) => state.tabFilters[TAB_KEY] || { pgs: [], banks: [], cardTypes: [] });
 
   const [sample, setSample] = useState<Transaction[]>([]);
 
@@ -32,7 +35,11 @@ export function UPITab() {
     }
     let cancelled = false;
     (async () => {
-      const txs = await getSampleFilteredTransactions(100000, { paymentModes: UPI_PAYMENT_MODES as unknown as string[] });
+      const txs = await getSampleFilteredTransactions(100000, {
+        paymentModes: UPI_PAYMENT_MODES as unknown as string[],
+        pgs: tabFilters.pgs.length ? tabFilters.pgs : undefined,
+        banks: tabFilters.banks.length ? tabFilters.banks : undefined,
+      });
       if (!cancelled) setSample(txs);
     })().catch(() => {
       if (!cancelled) setSample([]);
@@ -40,12 +47,19 @@ export function UPITab() {
     return () => {
       cancelled = true;
     };
-  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions]);
+  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions, tabFilters.pgs, tabFilters.banks]);
 
   const upiMetrics = useMemo(() => {
     const source = _useIndexedDB ? sample : filteredTransactions;
-    return computeUPIMetrics(source);
-  }, [filteredTransactions, _useIndexedDB, sample]);
+    const tabScoped = source
+      .filter((tx) => (tabFilters.pgs.length ? tabFilters.pgs.includes(tx.pg) : true))
+      .filter((tx) => {
+        if (!tabFilters.banks.length) return true;
+        const flow = classifyUPIFlow(tx.bankname);
+        return tabFilters.banks.includes(flow) || tabFilters.banks.includes(tx.bankname);
+      });
+    return computeUPIMetrics(tabScoped);
+  }, [filteredTransactions, _useIndexedDB, sample, tabFilters.pgs, tabFilters.banks]);
 
   const pgColumns: ColumnDef<GroupedMetrics>[] = useMemo(
     () => [

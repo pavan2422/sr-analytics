@@ -11,6 +11,7 @@ import { GroupedMetrics, FailureRCA, Transaction } from '@/types';
 import { formatNumber } from '@/lib/utils';
 
 const CARD_PAYMENT_MODES = ['CREDIT_CARD', 'DEBIT_CARD', 'PREPAID_CARD'] as const;
+const TAB_KEY = CARD_PAYMENT_MODES.join('|');
 
 export function CardsTab() {
   // Use selector to only subscribe to filteredTransactions
@@ -18,6 +19,7 @@ export function CardsTab() {
   const _useIndexedDB = useStore((state) => state._useIndexedDB);
   const filteredTransactionCount = useStore((state) => state.filteredTransactionCount);
   const getSampleFilteredTransactions = useStore((state) => state.getSampleFilteredTransactions);
+  const tabFilters = useStore((state) => state.tabFilters[TAB_KEY] || { pgs: [], banks: [], cardTypes: [] });
 
   const [sample, setSample] = useState<Transaction[]>([]);
 
@@ -32,7 +34,12 @@ export function CardsTab() {
     }
     let cancelled = false;
     (async () => {
-      const txs = await getSampleFilteredTransactions(100000, { paymentModes: CARD_PAYMENT_MODES as unknown as string[] });
+      const txs = await getSampleFilteredTransactions(100000, {
+        paymentModes: CARD_PAYMENT_MODES as unknown as string[],
+        pgs: tabFilters.pgs.length ? tabFilters.pgs : undefined,
+        banks: tabFilters.banks.length ? tabFilters.banks : undefined,
+        cardTypes: tabFilters.cardTypes.length ? tabFilters.cardTypes : undefined,
+      });
       if (!cancelled) setSample(txs);
     })().catch(() => {
       if (!cancelled) setSample([]);
@@ -40,12 +47,23 @@ export function CardsTab() {
     return () => {
       cancelled = true;
     };
-  }, [_useIndexedDB, filteredTransactionCount, getSampleFilteredTransactions]);
+  }, [
+    _useIndexedDB,
+    filteredTransactionCount,
+    getSampleFilteredTransactions,
+    tabFilters.pgs,
+    tabFilters.banks,
+    tabFilters.cardTypes,
+  ]);
 
   const cardMetrics = useMemo(() => {
     const source = _useIndexedDB ? sample : filteredTransactions;
-    return computeCardMetrics(source);
-  }, [filteredTransactions, _useIndexedDB, sample]);
+    const tabScoped = source
+      .filter((tx) => (tabFilters.pgs.length ? tabFilters.pgs.includes(tx.pg) : true))
+      .filter((tx) => (tabFilters.banks.length ? tabFilters.banks.includes(tx.bankname) : true))
+      .filter((tx) => (tabFilters.cardTypes.length ? tabFilters.cardTypes.includes(tx.cardtype) : true));
+    return computeCardMetrics(tabScoped);
+  }, [filteredTransactions, _useIndexedDB, sample, tabFilters.pgs, tabFilters.banks, tabFilters.cardTypes]);
 
   const baseColumns: ColumnDef<GroupedMetrics>[] = useMemo(
     () => [

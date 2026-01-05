@@ -2,6 +2,7 @@
 // Handles streaming writes and cursor-based reads to avoid loading all data into memory
 
 import { Transaction } from '@/types';
+import { classifyUPIFlow } from '@/lib/data-normalization';
 
 const DB_NAME = 'sr-analytics-transactions';
 const STORE_NAME = 'transactions';
@@ -343,7 +344,8 @@ class IndexedDBTransactionManager implements DBManager {
             if (!filters.pgs.includes(tx.pg)) include = false;
           }
           if (filters.banks && filters.banks.length > 0) {
-            const flow = tx.bankname || '';
+            // Banks filter is also used as UPI "Flow Type" (INTENT/COLLECT) in the UI.
+            const flow = classifyUPIFlow(tx.bankname);
             if (!filters.banks.includes(flow) && !filters.banks.includes(tx.bankname || '')) include = false;
           }
           if (filters.cardTypes && filters.cardTypes.length > 0) {

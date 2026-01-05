@@ -13,14 +13,15 @@ interface TabFiltersProps {
 
 export function TabFilters({ paymentMode }: TabFiltersProps) {
   const rawTransactions = useStore((s) => s.rawTransactions);
-  const filters = useStore((s) => s.filters);
-  const setFilters = useStore((s) => s.setFilters);
+  const tabFilters = useStore((s) => s.tabFilters);
+  const setTabFilters = useStore((s) => s.setTabFilters);
   const _useIndexedDB = useStore((s) => s._useIndexedDB);
   const filteredTransactionCount = useStore((s) => s.filteredTransactionCount);
   const getSampleFilteredTransactions = useStore((s) => s.getSampleFilteredTransactions);
 
   const [sample, setSample] = useState<Transaction[]>([]);
   const paymentModeKey = useMemo(() => paymentMode.join('|'), [paymentMode]);
+  const local = tabFilters[paymentModeKey] || { pgs: [], banks: [], cardTypes: [] };
 
   useEffect(() => {
     if (!_useIndexedDB) {
@@ -103,8 +104,8 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
             <MultiSelect
               label="PG"
               options={pgs}
-              value={filters.pgs}
-              onChange={(selected) => setFilters({ pgs: selected })}
+              value={local.pgs}
+              onChange={(selected) => setTabFilters(paymentModeKey, { pgs: selected })}
               placeholder="Select PG..."
             />
           </div>
@@ -116,8 +117,8 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
             <MultiSelect
               label={isUPITab ? "Flow Type" : "Bank"}
               options={banks}
-              value={filters.banks}
-              onChange={(selected) => setFilters({ banks: selected })}
+              value={local.banks}
+              onChange={(selected) => setTabFilters(paymentModeKey, { banks: selected })}
               placeholder={isUPITab ? "Select Flow Type..." : "Select Bank..."}
             />
           </div>
@@ -132,16 +133,16 @@ export function TabFilters({ paymentMode }: TabFiltersProps) {
                 <button
                   key={cardType}
                   onClick={() => {
-                    const isSelected = filters.cardTypes.includes(cardType);
-                    setFilters({
+                    const isSelected = local.cardTypes.includes(cardType);
+                    setTabFilters(paymentModeKey, {
                       cardTypes: isSelected
-                        ? filters.cardTypes.filter((ct) => ct !== cardType)
-                        : [...filters.cardTypes, cardType],
+                        ? local.cardTypes.filter((ct) => ct !== cardType)
+                        : [...local.cardTypes, cardType],
                     });
                   }}
                   className={cn(
                     'px-3 py-1 rounded-lg text-sm transition-colors',
-                    filters.cardTypes.includes(cardType)
+                    local.cardTypes.includes(cardType)
                       ? 'bg-primary text-primary-foreground'
                       : 'bg-muted text-muted-foreground hover:bg-muted/80'
                   )}

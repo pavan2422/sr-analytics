@@ -28,6 +28,11 @@ interface StoreState {
   // Filters
   filters: FilterState;
 
+  // Tab-scoped filters (do NOT affect other tabs)
+  tabFilters: Record<string, { pgs: string[]; banks: string[]; cardTypes: string[] }>;
+  setTabFilters: (tabKey: string, next: Partial<{ pgs: string[]; banks: string[]; cardTypes: string[] }>) => void;
+  clearTabFilters: (tabKey: string) => void;
+
   // Computed data (cached results)
   filteredTransactions: Transaction[]; // Only populated for small filtered sets
   filteredTransactionCount: number; // Count of filtered transactions
@@ -415,6 +420,7 @@ export const useStore = create<StoreState>()(
       hasHydrated: false,
       analysisStage: null,
       filters: defaultFilters,
+      tabFilters: {},
       filteredTransactions: [],
       filteredTransactionCount: 0,
       globalMetrics: null,
@@ -655,6 +661,30 @@ export const useStore = create<StoreState>()(
           void get().applyFilters();
           filterTimeout = null;
         }, 100); // 100ms debounce for faster response
+      },
+
+      setTabFilters: (tabKey, next) => {
+        set((state) => {
+          const prev = state.tabFilters[tabKey] || { pgs: [], banks: [], cardTypes: [] };
+          return {
+            tabFilters: {
+              ...state.tabFilters,
+              [tabKey]: {
+                pgs: next.pgs ?? prev.pgs,
+                banks: next.banks ?? prev.banks,
+                cardTypes: next.cardTypes ?? prev.cardTypes,
+              },
+            },
+          };
+        });
+      },
+      clearTabFilters: (tabKey) => {
+        set((state) => {
+          if (!state.tabFilters[tabKey]) return state;
+          const next = { ...state.tabFilters };
+          delete next[tabKey];
+          return { tabFilters: next };
+        });
       },
 
       resetFilters: () => {
@@ -929,6 +959,7 @@ export const useStore = create<StoreState>()(
           error: null,
           progress: null,
           filters: defaultFilters,
+          tabFilters: {},
           analysisStage: null,
           _skipPersistence: false,
           _useIndexedDB: false,
@@ -958,6 +989,7 @@ export const useStore = create<StoreState>()(
           fileSizes: state.fileSizes,
           _useIndexedDB: state._useIndexedDB,
           transactionCount: state.transactionCount,
+          tabFilters: state.tabFilters,
         };
       },
       merge: (persistedState: any, currentState: StoreState) => {
@@ -973,6 +1005,7 @@ export const useStore = create<StoreState>()(
             rawTransactions: transactions,
             _useIndexedDB: persistedState._useIndexedDB ?? currentState._useIndexedDB,
             transactionCount: persistedState.transactionCount ?? currentState.transactionCount,
+            tabFilters: persistedState.tabFilters ?? currentState.tabFilters,
           };
         }
         // For IndexedDB mode (no rawTransactions but has fileNames)
@@ -982,6 +1015,7 @@ export const useStore = create<StoreState>()(
             ...persistedState,
             _useIndexedDB: persistedState._useIndexedDB ?? currentState._useIndexedDB,
             transactionCount: persistedState.transactionCount ?? currentState.transactionCount,
+            tabFilters: persistedState.tabFilters ?? currentState.tabFilters,
           };
         }
         return { ...currentState, ...persistedState };
